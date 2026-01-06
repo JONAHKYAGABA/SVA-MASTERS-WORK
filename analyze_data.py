@@ -198,12 +198,15 @@ class DataAnalyzer:
         if qa_dir.exists():
             logger.info(f"✓ QA directory found: {qa_dir}")
         elif qa_zip.exists():
-            self.report.issues.append("qa.zip found but not extracted! Run extraction first.")
-            logger.error(f"✗ qa.zip found but NOT EXTRACTED!")
-            logger.error(f"  Please extract qa.zip first:")
-            logger.error(f"  Windows: Expand-Archive -Path '{qa_zip}' -DestinationPath '{self.mimic_qa_path}'")
-            logger.error(f"  Linux:   unzip '{qa_zip}' -d '{self.mimic_qa_path}'")
-            valid = False
+            logger.warning(f"⚠ qa.zip found but not extracted. Attempting automatic extraction...")
+            if self._extract_zip(qa_zip, self.mimic_qa_path):
+                logger.info(f"✓ qa.zip extracted successfully")
+            else:
+                self.report.issues.append("qa.zip found but extraction failed!")
+                logger.error(f"✗ Failed to extract qa.zip")
+                logger.error(f"  Please extract manually:")
+                logger.error(f"  Linux:   unzip '{qa_zip}' -d '{self.mimic_qa_path}'")
+                valid = False
         else:
             self.report.issues.append("QA directory not found (need to extract qa.zip)")
             logger.error(f"✗ QA directory not found at {qa_dir}")
@@ -216,17 +219,49 @@ class DataAnalyzer:
         if scene_data_dir.exists():
             logger.info(f"✓ Scene data directory found: {scene_data_dir}")
         elif scene_data_zip.exists():
-            self.report.issues.append("scene_data.zip found but not extracted! Run extraction first.")
-            logger.error(f"✗ scene_data.zip found but NOT EXTRACTED!")
-            logger.error(f"  Please extract scene_data.zip first:")
-            logger.error(f"  Windows: Expand-Archive -Path '{scene_data_zip}' -DestinationPath '{self.mimic_qa_path}'")
-            logger.error(f"  Linux:   unzip '{scene_data_zip}' -d '{self.mimic_qa_path}'")
-            valid = False
+            logger.warning(f"⚠ scene_data.zip found but not extracted. Attempting automatic extraction...")
+            if self._extract_zip(scene_data_zip, self.mimic_qa_path):
+                logger.info(f"✓ scene_data.zip extracted successfully")
+            else:
+                self.report.issues.append("scene_data.zip found but extraction failed!")
+                logger.error(f"✗ Failed to extract scene_data.zip")
+                logger.error(f"  Please extract manually:")
+                logger.error(f"  Linux:   unzip '{scene_data_zip}' -d '{self.mimic_qa_path}'")
+                valid = False
         else:
             self.report.warnings.append("Scene data directory not found")
             logger.warning(f"⚠ Scene data directory not found at {scene_data_dir}")
         
         return valid
+    
+    def _extract_zip(self, zip_path: Path, dest_path: Path) -> bool:
+        """Extract a ZIP file automatically."""
+        import zipfile
+        import subprocess
+        
+        logger.info(f"  Extracting {zip_path.name}... (this may take several minutes)")
+        
+        # Try system unzip first (faster for large files)
+        try:
+            result = subprocess.run(
+                ['unzip', '-o', '-q', str(zip_path), '-d', str(dest_path)],
+                capture_output=True,
+                text=True,
+                timeout=3600  # 1 hour timeout
+            )
+            if result.returncode == 0:
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        
+        # Fall back to Python zipfile
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(dest_path)
+            return True
+        except Exception as e:
+            logger.error(f"  Extraction error: {e}")
+            return False
     
     def _analyze_splits(self):
         """Analyze train/val/test splits."""
