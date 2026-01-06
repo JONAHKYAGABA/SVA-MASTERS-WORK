@@ -191,12 +191,40 @@ class DataAnalyzer:
             self.report.warnings.append("Images 'files' directory not found")
             logger.warning(f"⚠ Images 'files' directory not found at {files_dir}")
         
+        # Check QA directory - must be extracted from qa.zip
         qa_dir = self.mimic_qa_path / 'qa'
+        qa_zip = self.mimic_qa_path / 'qa.zip'
+        
         if qa_dir.exists():
             logger.info(f"✓ QA directory found: {qa_dir}")
+        elif qa_zip.exists():
+            self.report.issues.append("qa.zip found but not extracted! Run extraction first.")
+            logger.error(f"✗ qa.zip found but NOT EXTRACTED!")
+            logger.error(f"  Please extract qa.zip first:")
+            logger.error(f"  Windows: Expand-Archive -Path '{qa_zip}' -DestinationPath '{self.mimic_qa_path}'")
+            logger.error(f"  Linux:   unzip '{qa_zip}' -d '{self.mimic_qa_path}'")
+            valid = False
         else:
-            self.report.warnings.append("QA directory not found")
-            logger.warning(f"⚠ QA directory not found at {qa_dir}")
+            self.report.issues.append("QA directory not found (need to extract qa.zip)")
+            logger.error(f"✗ QA directory not found at {qa_dir}")
+            valid = False
+        
+        # Check scene_data directory - must be extracted from scene_data.zip
+        scene_data_dir = self.mimic_qa_path / 'scene_data'
+        scene_data_zip = self.mimic_qa_path / 'scene_data.zip'
+        
+        if scene_data_dir.exists():
+            logger.info(f"✓ Scene data directory found: {scene_data_dir}")
+        elif scene_data_zip.exists():
+            self.report.issues.append("scene_data.zip found but not extracted! Run extraction first.")
+            logger.error(f"✗ scene_data.zip found but NOT EXTRACTED!")
+            logger.error(f"  Please extract scene_data.zip first:")
+            logger.error(f"  Windows: Expand-Archive -Path '{scene_data_zip}' -DestinationPath '{self.mimic_qa_path}'")
+            logger.error(f"  Linux:   unzip '{scene_data_zip}' -d '{self.mimic_qa_path}'")
+            valid = False
+        else:
+            self.report.warnings.append("Scene data directory not found")
+            logger.warning(f"⚠ Scene data directory not found at {scene_data_dir}")
         
         return valid
     
