@@ -1,0 +1,133 @@
+# MIMIC-CXR VQA Training Configuration
+# =====================================
+# Default configuration for SSG-VQA-Net adapted for chest X-ray VQA
+
+model:
+  # Visual backbone
+  visual_backbone: "convnext_base"
+  text_encoder: "emilyalsentzer/Bio_ClinicalBERT"
+  
+  # Feature dimensions
+  visual_feature_dim: 512
+  scene_graph_dim: 134  # 6 bbox + 64 region + 64 entity
+  visual_embedding_dim: 646
+  
+  # Architecture
+  hidden_size: 768
+  intermediate_size: 3072
+  num_hidden_layers: 6
+  num_attention_heads: 12
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  
+  # Scene-Embedded Interaction Module
+  sim_layers: 2
+  
+  # Scene graph vocabulary
+  num_regions: 310
+  num_entities: 237
+  region_embedding_dim: 64
+  entity_embedding_dim: 64
+  
+  # Answer heads
+  num_binary_classes: 2
+  num_category_classes: 14
+  num_region_classes: 26
+  num_severity_classes: 4
+  
+  # Text processing
+  max_question_length: 128
+  vocab_size: 30522
+
+data:
+  # Dataset paths - MODIFY THESE FOR YOUR SETUP
+  mimic_cxr_jpg_path: "/path/to/MIMIC-CXR-JPG"
+  mimic_ext_cxr_qba_path: "/path/to/MIMIC-Ext-CXR-QBA"
+  chexpert_labels_path: ""  # Optional
+  
+  # Quality filtering
+  quality_grade: "A"  # A for fine-tuning, B for pre-training
+  view_filter: "frontal_only"  # frontal_only, lateral_only, all
+  
+  # Question types (null = all)
+  question_types: null
+  
+  # Image preprocessing
+  image_size: 224
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+training:
+  # Output
+  output_dir: "./checkpoints/mimic-cxr-vqa"
+  
+  # Batch size
+  batch_size_per_gpu: 16
+  gradient_accumulation_steps: 4
+  
+  # Learning rate
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  
+  # Epochs
+  num_epochs: 20
+  
+  # Mixed precision
+  fp16: true
+  
+  # Gradient checkpointing (saves memory)
+  gradient_checkpointing: true
+  
+  # Loss weights
+  vqa_loss_weight: 1.0
+  chexpert_loss_weight: 0.3
+  binary_head_weight: 1.0
+  category_head_weight: 0.5
+  region_head_weight: 0.5
+  severity_head_weight: 0.3
+  
+  # Logging and saving
+  logging_steps: 100
+  save_steps: 5000
+  save_total_limit: 5
+  eval_steps: 2500
+  
+  # Best model tracking
+  metric_for_best_model: "accuracy"
+  greater_is_better: true
+  
+  # Early stopping
+  early_stopping_patience: 5
+  
+  # Data loading
+  dataloader_num_workers: 8
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 2
+  
+  # Hugging Face Hub (optional)
+  hub_model_id: ""  # e.g., "your-username/mimic-cxr-vqa-ssg"
+  hub_private_repo: true
+  push_to_hub_strategy: "best"
+  
+  # Reproducibility
+  seed: 42
+
+wandb:
+  enabled: true
+  project: "mimic-cxr-vqa"
+  entity: ""  # Your wandb username or team
+  name: ""  # Auto-generated if empty
+  group: "experiments"
+  tags: ["ssg-vqa", "mimic-cxr", "medical-vqa"]
+  notes: "SSG-VQA-Net adapted for MIMIC-CXR chest X-ray VQA"
+  watch_model: false
+  watch_log_freq: 1000
+  log_model: true
+
+deepspeed:
+  enabled: false
+  config_path: "configs/deepspeed_config.json"
+  stage: 2
+
