@@ -1,222 +1,268 @@
-<div align="center">
-<a href="http://camma.u-strasbg.fr/">
-<img src="asset/camma_logo.png" width="30%">
-</a>
-</div>
+# SSG-VQA for MIMIC-CXR: Medical Visual Question Answering
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.0+](https://img.shields.io/badge/pytorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-# **Advancing Surgical VQA with Scene Graph Knowledge**
-_Kun Yuan, Manasi Kattel, Joel, L. Lavanchy, Nassir Navab, [Vinkle Srivastav](https://vinkle.github.io/), Nicolas Padoy_, 2023
+**Scene-Graph enhanced Visual Question Answering** adapted for Chest X-Ray analysis using MIMIC-CXR-JPG and MIMIC-Ext-CXR-QBA datasets.
 
-<div align="center">
-<img src="asset/ssg-vqa.jpg" width="100%">
-</a>
-</div>
+<p align="center">
+  <img src="asset/model.png" width="800" alt="SSG-VQA Architecture"/>
+</p>
 
-# $$\color{Blue} SSG-VQA \space Dataset $$
+## 🔬 Key Features
 
-This repo contains an open-source PyTorch code and the dataset for the paper [Advancing Surgical VQA with Scene Graph Knowledge](https://arxiv.org/abs/2312.10251)
+- **ConvNeXt-Base Visual Backbone**: Pre-trained vision model for chest X-ray feature extraction
+- **Bio+ClinicalBERT Text Encoder**: Domain-specific language model for medical questions  
+- **Scene Graph Integration**: 134-dimensional scene graph embeddings from MIMIC-Ext-CXR-QBA
+- **Multi-Head Answer Module**: Specialized heads for Binary, Category, Region, and Severity answers
+- **Multi-Task Learning**: Joint VQA + CheXpert classification training
+- **Hardware Auto-Optimization**: Automatic detection and optimization for any GPU configuration
 
+## 📁 Repository Structure
 
+```
+SSG-VQA-main/
+├── 📂 configs/                    # Configuration files
+│   ├── default_config.yaml        # Default training configuration
+│   ├── deepspeed_config.json      # DeepSpeed ZeRO-2 settings
+│   └── mimic_cxr_config.py        # Python config dataclasses
+│
+├── 📂 data/                       # Data loading & processing
+│   ├── __init__.py
+│   └── mimic_cxr_dataset.py       # MIMIC-CXR VQA dataset class
+│
+├── 📂 models/                     # Model architectures
+│   ├── __init__.py
+│   └── mimic_vqa_model.py         # Complete SSG-VQA model
+│
+├── 📂 training/                   # Training utilities
+│   ├── __init__.py
+│   ├── loss.py                    # Multi-task loss functions
+│   └── metrics.py                 # Evaluation metrics
+│
+├── 📂 utils/                      # Utility functions
+│   ├── __init__.py
+│   ├── utils.py                   # General utilities
+│   └── hardware_utils.py          # Hardware auto-detection
+│
+├── 📂 scripts/                    # Shell scripts
+│   ├── setup_gcp.sh               # GCP environment setup
+│   ├── setup.sh                   # General setup script
+│   └── launch_distributed_training.sh  # Multi-GPU training launcher
+│
+├── 📂 docs/                       # Documentation
+│   ├── MIMIC_CXR_VQA_ANALYSIS.md  # Detailed methodology analysis
+│   ├── MULTI_GPU_TRAINING.md      # Multi-GPU training guide
+│   ├── TRAINING_GUIDE.md          # Step-by-step training guide
+│   ├── SETUP_DATA.md              # Data setup instructions
+│   ├── architecture_diagram.md    # Architecture details
+│   ├── methodology.md             # Research methodology
+│   ├── mimic-cxr-jpg.md           # MIMIC-CXR-JPG documentation
+│   └── mimic-ext-cxr-qba.md       # MIMIC-Ext-CXR-QBA documentation
+│
+├── 📂 tests/                      # Unit tests
+├── 📂 examples/                   # Example notebooks/scripts
+├── 📂 asset/                      # Images and assets
+│
+├── 📜 train_mimic_cxr.py          # Main training script
+├── 📜 evaluate.py                 # Model evaluation script
+├── 📜 analyze_data.py             # Data analysis & validation
+├── 📜 setup_data.py               # Data extraction & setup
+├── 📜 requirements.txt            # Python dependencies
+├── 📜 environment.yml             # Conda environment
+└── 📜 LICENSE                     # MIT License
+```
 
-[![arXiv](https://img.shields.io/badge/arxiv-2312.10251-red)](https://arxiv.org/abs/2312.10251)
+## 🚀 Quick Start
 
-## Introduction
+### 1. Environment Setup
 
-The modern operating room is becoming increasingly complex, requiring innovative intra-operative support systems. While the focus of surgical data science has largely been on video analysis, integrating surgical computer vision with natural language capabilities is emerging as a necessity. Our work aims to advance Visual Question Answering (VQA) in the surgical context with scene graph knowledge, addressing two main challenges in the current surgical VQA systems: removing question-condition bias in the surgical VQA dataset and incorporating scene-aware reasoning in the surgical VQA model design.
-
-
-First, we propose a **S**urgical **S**cene **G**raph-based dataset, SSG-VQA, generated by employing segmentation and detection models on publicly available datasets. We build surgical scene graphs using spatial and action information of instruments and anatomies. These graphs are fed into a question engine, generating diverse QA pairs. Our SSG-VQA dataset provides a more complex, diverse, geometrically grounded, unbiased, and surgical action-oriented dataset compared to existing surgical VQA datasets. We then propose SSG-VQA-Net, a novel surgical VQA model incorporating a lightweight Scene-embedded Interaction Module (SIM), which integrates geometric scene knowledge in the VQA model design by employing cross-attention between the textual and the scene features. 
-
-Our comprehensive analysis of the SSG-VQA dataset shows that SSG-VQA-Net outperforms existing methods across different question types and complexities. We highlight that the primary limitation in the current surgical VQA systems is the lack of scene knowledge to answer complex queries. 
-
-#### SSG-VQA dataset generation pipeline 
-<!-- ![pipeline](./asset/pipeline.png) -->
-<img src="./asset/ssg_qa_dataset.gif" alt="SSG-QA_Net" width="800"/>
-
-#### SG-VQA-Net
-<img src="./asset/model.png" alt="SSG-QA_Net" width="800"/>
-
-
-# Get started
-
-## Installation
-## Environment
-You need to have a Anaconda3 installed for the setup. We developed the code on Python 3.8, PyTorch 1.7.1, and CUDA 10.2.
 ```bash
-$ git clone https://github.com/CAMMA-public/SSG-VQA.git
-$ conda env create -f environment.yml
-$ conda activate ssgvqa
+# Clone the repository
+git clone https://github.com/your-username/SSG-VQA-main.git
+cd SSG-VQA-main
+
+# Create conda environment
+conda create -n mimic-vqa python=3.10 -y
+conda activate mimic-vqa
+
+# Install PyTorch with CUDA 12.1 (for L4/A10 GPUs)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-## Downloads
-#### Question-answer pairs
-Download question-answer pairs from from our S3 server and unzip it into **./data/qa_txt** folder
-```bash
-(ssgvqa)$ wget https://s3.unistra.fr/camma_public/github/ssg-qa/ssg-qa.zip
-(ssgvqa)$ unzip ssg-qa.zip -d ./data/qa_txt
-```
-#### Scene Graphs
-We provide the scene graph in **scene_graph_ssgqa.zip** in .json format.          
-The relationship is a list, where index is the subject of this relationship, and the index is the target, e.g., 'left': [[1, 2], [], []], means the 0 object is to the left of object 1 and 2.            
-The image size that bounding boxes are corresponded to is (240, 430)   
-#### Visual features
--  (Recommended) Download the features to train and test the model from our S3 server and unzip the files into folder **./data/visual_feats** folder   
+### 2. Data Setup
 
 ```bash
-(ssgvqa)$ wget https://s3.unistra.fr/camma_public/github/ssg-qa/cropped_images.zip
-(ssgvqa)$ wget https://s3.unistra.fr/camma_public/github/ssg-qa/roi_yolo_coord.zip
-(ssgvqa)$ unzip cropped_images.zip -d ./data/visual_feats
-(ssgvqa)$ unzip roi_yolo_coord.zip -d ./data/visual_feats
+# Setup data paths (modify for your environment)
+export MIMIC_CXR_PATH=/path/to/mimic-cxr-jpg
+export MIMIC_QA_PATH=/path/to/mimic-ext-cxr-qba
+
+# Extract scene graph data (if zipped)
+python setup_data.py --extract_all --mimic_qa_path $MIMIC_QA_PATH
+
+# Analyze and validate data
+python analyze_data.py --mimic_cxr_path $MIMIC_CXR_PATH --mimic_qa_path $MIMIC_QA_PATH
 ```
 
-- Or, create the features by yourself using the images from public [CholecT45](http://camma.u-strasbg.fr/datasets): 
+### 3. Training
+
 ```bash
-(ssgvqa)$ python utils/feat_extract_visual.py
-(ssgvqa)$ python utils/feature_extract_roi.py
-```
-### Model weights for the SSG-VQA-Net
-Place the model weights in the [`checkpoints`](./checkpoints) directory
-|   Model      |  Model Weights |
-| :----------: | :-----:   |
-| SSG-VQA-Net| [download](https://s3.unistra.fr/camma_public/github/ssg-qa/ssg-qa-net.pth.tar) |
+# Option 1: Auto-optimized training (recommended)
+# Automatically detects hardware and sets optimal parameters
+./scripts/launch_distributed_training.sh --config configs/default_config.yaml
 
-#### Directory structure should look as follows.
+# Option 2: Direct Python launch
+python train_mimic_cxr.py \
+    --config configs/default_config.yaml \
+    --mimic_cxr_path $MIMIC_CXR_PATH \
+    --mimic_qa_path $MIMIC_QA_PATH
 
-```
-# checkpoints: this is the folder in which all the weights are saved.           
-# data: this is the folder in which in which all the the pre-extracted features are saved.
-
-├──checkpoints      
-│   ├── experiment1
-│   │   └── Best.pth.tar
-│   └── ...
-├──data                   
-│   ├── visual_feats
-│   │   ├── cropped_images
-│   │   │   └── VID01
-│   │   │       └── vqa
-│   │   │           └── img_features
-│   │   │               └── 1x1
-│   │   │                   └── 000001.hdf5
-│   │   │                   └── ...
-│   │   ├── roi_yolo_coord
-│   │   │   └── VID01
-│   │   │       └── labels
-│   │   │           └── vqa
-│   │   │               └── img_features
-│   │   │                   └── roi
-│   │   │                       └── 000001.hdf5
-│   │   │                       └── ...
-│   └── qa_txt
-│       └── VID01
-│           └── 1.txt
-│           └── ...
-└── ...
-```       
-
-
-
-## Training
-
-```bash 
-(ssgvqa)$ python train.py --validate=False   
-```  
-
-
-## Evaluation
-```bash 
-(ssgvqa)$ python test.py --validate=True --checkpoint checkpoints/ssg-qa-net.pth.tar
-```    
-Evaluate the performance in different complexity: set --dataset_type=ssg-qa-roi-analysis 
-```bash 
-(ssgvqa)$ python test.py --validate=True --dataset_type=ssg-qa-roi-analysis --checkpoint checkpoints/ssg-qa-net.pth.tar
+# Option 3: GCP setup (4x L4 GPUs)
+./scripts/setup_gcp.sh
 ```
 
-## Results
-The SSG-VQA dataset is a multi-class classification-based VQA dataset, we report the F1-Score in the table.
-| Model   | Query Object |  Query Attribute | Existence | Counting  | Zero-hop | One-hop | Single-and | Mean |
-|------:|:------:|:------:|:------:|:------:|:------:|:------:|:------:| :------:|
-| SSG-VQA-Net | 49.4 | 60.0  | 75.8 | 28.6 | 58.2 |  52.4 | 38.4 | 54.9 |
+### 4. Evaluation
 
+```bash
+python evaluate.py \
+    --model_path ./checkpoints/best_model \
+    --config configs/default_config.yaml
+```
 
-## Citing SSG-VQA 
-This dataset could only be generated thanks to the continuous support from our clinical partners. If you use this dataset, you are kindly requested to
-cite the work that led to the generation of this dataset:
+## ⚡ Hardware Auto-Optimization
+
+The training pipeline automatically detects your hardware and optimizes settings:
+
+```bash
+# Check detected hardware and optimal settings
+python -m utils.hardware_utils
+```
+
+**Example output for 4x NVIDIA L4:**
+```
+╔══════════════════════════════════════════════════════════════════════╗
+║           HARDWARE DETECTION RESULTS                                  ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  GPUs:             4    x NVIDIA L4                                   ║
+║  GPU Memory:       24   GB per GPU (96 GB total)                      ║
+║  Optimal Settings:                                                    ║
+║    Batch per GPU:    16                                               ║
+║    Grad accumulation: 4                                               ║
+║    Effective batch:  256                                              ║
+║    DeepSpeed:        ZeRO-2                                           ║
+╚══════════════════════════════════════════════════════════════════════╝
+```
+
+## 📊 Model Architecture
+
+| Component | Details |
+|-----------|---------|
+| **Visual Backbone** | ConvNeXt-Base (pretrained) → 512-dim features |
+| **Text Encoder** | Bio+ClinicalBERT → 768-dim embeddings |
+| **Scene Graph** | 134-dim (6 bbox + 64 region + 64 entity) |
+| **Fusion** | Scene-embedded Interaction Module (SIM) |
+| **Answer Heads** | Binary (2), Category (14), Region (26), Severity (4) |
+| **Auxiliary** | CheXpert 14-class classification |
+
+## 🔧 Configuration
+
+Edit `configs/default_config.yaml`:
+
+```yaml
+model:
+  visual_backbone: "convnext_base"
+  text_encoder: "emilyalsentzer/Bio_ClinicalBERT"
+  hidden_dim: 512
+  
+training:
+  batch_size_per_gpu: 16           # Auto-optimized by hardware
+  gradient_accumulation_steps: 4   # Effective batch = 256
+  learning_rate: 2.0e-5
+  num_epochs: 20
+  fp16: true
+  gradient_checkpointing: true
+  
+deepspeed:
+  enabled: true                    # Auto-enabled for multi-GPU
+  stage: 2                         # ZeRO optimization level
+```
+
+## 📈 Experiment Tracking
+
+**Weights & Biases** integration for real-time monitoring:
+
+```bash
+# Set API key (or add to ~/.env)
+export WANDB_API_KEY=your_key_here
+
+# Training will automatically log to W&B
+python train_mimic_cxr.py --config configs/default_config.yaml
+```
+
+**Hugging Face Hub** for model checkpointing:
+
+```bash
+# Set token (or add to ~/.env)
+export HF_TOKEN=your_token_here
+
+# Configure in config.yaml
+training:
+  hub_model_id: "your-username/mimic-cxr-vqa"
+```
+
+## 📚 Documentation
+
+- **[Training Guide](docs/TRAINING_GUIDE.md)**: Complete training walkthrough
+- **[Multi-GPU Training](docs/MULTI_GPU_TRAINING.md)**: Distributed training setup
+- **[Data Setup](docs/SETUP_DATA.md)**: Dataset preparation
+- **[Methodology](docs/methodology.md)**: Research methodology
+- **[Architecture](docs/architecture_diagram.md)**: Detailed model architecture
+
+## 🔬 Datasets
+
+This project uses two MIMIC datasets:
+
+| Dataset | Description | Access |
+|---------|-------------|--------|
+| **MIMIC-CXR-JPG** | 377,110 chest X-ray images | [PhysioNet](https://physionet.org/content/mimic-cxr-jpg/) |
+| **MIMIC-Ext-CXR-QBA** | 38.7M QA pairs with scene graphs | [PhysioNet](https://physionet.org/content/mimic-ext-cxr-qba/) |
+
+⚠️ **Access Requirements**: Both datasets require credentialed PhysioNet access and CITI training.
+
+## 📝 Citation
+
+If you use this code, please cite:
+
 ```bibtex
-@article{yuan2024advancing,
-  title={Advancing surgical VQA with scene graph knowledge},
-  author={Yuan, Kun and Kattel, Manasi and Lavanchy, Jo{\"e}l L and Navab, Nassir and Srivastav, Vinkle and Padoy, Nicolas},
-  journal={International Journal of Computer Assisted Radiology and Surgery},
-  pages={1--9},
-  year={2024},
-  publisher={Springer}
+@article{seenivasan2023ssgqa,
+  title={Surgical-VQA: Visual Question Answering in Surgical Scenes using Transformer},
+  author={Seenivasan, Lalithkumar and Islam, Mobarakol and others},
+  journal={MICCAI},
+  year={2022}
+}
+
+@article{johnson2019mimic,
+  title={MIMIC-CXR-JPG: A large publicly available database of labeled chest radiographs},
+  author={Johnson, Alistair EW and others},
+  journal={arXiv preprint},
+  year={2019}
 }
 ```
-[[`Download PDF`](https://arxiv.org/pdf/2312.10251.pdf)]
 
+## 📄 License
 
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
 
-## Other works that have contributed to the generation of SSG-VQA dataset
-```bibtex
-@article{nwoye2022rendezvous,
-  title={Rendezvous: Attention mechanisms for the recognition of surgical action triplets in endoscopic videos},
-  author={Nwoye, Chinedu Innocent and Yu, Tong and Gonzalez, Cristians and Seeliger, Barbara and Mascagni, Pietro and Mutter, Didier and Marescaux, Jacques and Padoy, Nicolas},
-  journal={Medical Image Analysis},
-  volume={78},
-  pages={102433},
-  year={2022},
-  publisher={Elsevier}
-}
-```
-[[`Download PDF`](https://arxiv.org/pdf/2109.03223.pdf)]
+## 🤝 Contributing
 
-```bibtex
-@article{twinanda2016endonet,
-  title={Endonet: a deep architecture for recognition tasks on laparoscopic videos},
-  author={Twinanda, Andru P and Shehata, Sherif and Mutter, Didier and Marescaux, Jacques and De Mathelin, Michel and Padoy, Nicolas},
-  journal={IEEE transactions on medical imaging},
-  volume={36},
-  number={1},
-  pages={86--97},
-  year={2016},
-  publisher={IEEE}
-}
-```
-[[`Download PDF`](https://arxiv.org/pdf/1602.03012.pdf)]
+Contributions are welcome! Please feel free to submit a Pull Request.
 
-```bibtex
-@inproceedings{jin2018tool,
-  title={Tool detection and operative skill assessment in surgical videos using region-based convolutional neural networks},
-  author={Jin, Amy and Yeung, Serena and Jopling, Jeffrey and Krause, Jonathan and Azagury, Dan and Milstein, Arnold and Fei-Fei, Li},
-  booktitle={2018 IEEE winter conference on applications of computer vision (WACV)},
-  pages={691--699},
-  year={2018},
-  organization={IEEE}
-}
-```
-[[`Download PDF`](https://arxiv.org/pdf/1802.08774.pdf)]
-
-
-```bibtex
-@article{hong2020cholecseg8k,
-  title={Cholecseg8k: a semantic segmentation dataset for laparoscopic cholecystectomy based on cholec80},
-  author={Hong, W-Y and Kao, C-L and Kuo, Y-H and Wang, J-R and Chang, W-L and Shih, C-S},
-  journal={arXiv preprint arXiv:2012.12453},
-  year={2020}
-}
-```
-[[`Download PDF`](https://arxiv.org/pdf/2012.12453.pdf)]
-
-
-## License
-This code, models, and datasets are available for non-commercial scientific research purposes as defined in the [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). By downloading and using this code you agree to the terms in the [LICENSE](LICENSE). Third-party codes are subject to their respective licenses.
-
-By downloading and using this repo or dataset, you agree on these terms and conditions.
-
-## Acknowledgement
-This work has received funding from the European Union (ERC, CompSURG, 101088553). Views and opinions expressed are however those of the authors only and do not necessarily reflect those of the European Union or the European
-Research Council. Neither the European Union nor the granting authority can be held responsible for them. This work was also partially supported by French state funds managed by the ANR under Grants ANR-20-CHIA-0029-01 and ANR-10-IAHU-02.
-
-## CONTACT
-This dataset was generated by the research group CAMMA: http://camma.u-strasbg.fr/. Any updates regarding this dataset can be found here: http://camma.u-strasbg.fr/datasets. Any questions regarding the dataset can be sent to kyuan@unistra.fr or srivastav@unistra.fr
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request

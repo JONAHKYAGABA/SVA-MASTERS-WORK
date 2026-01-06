@@ -1,0 +1,149 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssg-vqa-mimic"
+version = "1.0.0"
+description = "Scene-Graph enhanced Visual Question Answering for MIMIC-CXR Chest X-Rays"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = [
+    "medical-imaging",
+    "vqa",
+    "visual-question-answering",
+    "chest-xray",
+    "deep-learning",
+    "transformer",
+    "mimic-cxr",
+    "scene-graph"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.30.0",
+    "timm>=0.9.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "Pillow>=9.0.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+    "scikit-learn>=1.2.0",
+    "wandb>=0.15.0",
+    "huggingface-hub>=0.16.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.3.0",
+    "pytest-cov>=4.1.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+]
+distributed = [
+    "deepspeed>=0.10.0",
+    "accelerate>=0.20.0",
+]
+full = [
+    "ssg-vqa-mimic[dev,distributed]",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "plotly>=5.15.0",
+    "jupyter>=1.0.0",
+    "tensorboard>=2.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-username/SSG-VQA-main"
+Documentation = "https://github.com/your-username/SSG-VQA-main/tree/main/docs"
+Repository = "https://github.com/your-username/SSG-VQA-main"
+Issues = "https://github.com/your-username/SSG-VQA-main/issues"
+
+[project.scripts]
+ssg-train = "train_mimic_cxr:main"
+ssg-evaluate = "evaluate:main"
+ssg-analyze = "analyze_data:main"
+ssg-hardware = "utils.hardware_utils:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["configs*", "data*", "models*", "training*", "utils*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.json"]
+
+# Black configuration
+[tool.black]
+line-length = 100
+target-version = ['py310']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.hg
+    | \.mypy_cache
+    | \.tox
+    | \.venv
+    | _build
+    | buck-out
+    | build
+    | dist
+    | __pycache__
+)/
+'''
+
+# isort configuration
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+known_first_party = ["configs", "data", "models", "training", "utils"]
+
+# pytest configuration
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+addopts = "-v --tb=short"
+
+# mypy configuration
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+# coverage configuration
+[tool.coverage.run]
+source = ["configs", "data", "models", "training", "utils"]
+omit = ["tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+

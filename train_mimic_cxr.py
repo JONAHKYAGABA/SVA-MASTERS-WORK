@@ -41,9 +41,21 @@ from typing import Dict, Optional, Any
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
+
+# DeepSpeed import (optional)
+try:
+    import deepspeed
+    from deepspeed import DeepSpeedEngine
+    DEEPSPEED_AVAILABLE = True
+except ImportError:
+    DEEPSPEED_AVAILABLE = False
+    print("DeepSpeed not available. Install with: pip install deepspeed")
 
 # Load environment variables from .env file
 def load_env_file():
@@ -94,6 +106,13 @@ from data.mimic_cxr_dataset import MIMICCXRVQADataset, create_dataloader
 from models.mimic_vqa_model import MIMICCXRVQAModel, MIMICVQAOutput
 from training.loss import MultiTaskLoss
 from training.metrics import VQAMetrics
+from utils.hardware_utils import (
+    detect_hardware,
+    print_hardware_info,
+    optimize_for_hardware,
+    set_optimal_environment,
+    get_deepspeed_config_for_hardware,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -118,6 +137,92 @@ def seed_everything(seed: int = 42):
     os.environ['PYTHONHASHSEED'] = str(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def setup_distributed(args) -> tuple[int, int, bool]:
+    """
+    Setup distributed training environment.
+    
+    Returns:
+        local_rank: GPU index on this node
+        world_size: Total number of GPUs across all nodes
+        is_distributed: Whether distributed training is enabled
+    """
+    # Check for DeepSpeed environment
+    if args.use_deepspeed and DEEPSPEED_AVAILABLE:
+        deepspeed.init_distributed()
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        is_distributed = world_size > 1
+        logger.info(f"DeepSpeed distributed initialized: rank {local_rank}/{world_size}")
+        return local_rank, world_size, is_distributed
+    
+    # Check for torchrun/DDP environment
+    if args.use_ddp or 'RANK' in os.environ:
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+        
+        if world_size > 1:
+            dist.init_process_group(backend='nccl')
+            torch.cuda.set_device(local_rank)
+            is_distributed = True
+            logger.info(f"DDP distributed initialized: rank {local_rank}/{world_size}")
+        else:
+            is_distributed = False
+        
+        return local_rank, world_size, is_distributed
+    
+    # Single GPU / CPU fallback
+    return 0, 1, False
+
+
+def cleanup_distributed():
+    """Clean up distributed training resources."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def is_main_process(local_rank: int) -> bool:
+    """Check if this is the main process (for logging, saving, etc.)."""
+    return local_rank == 0
+
+
+def get_effective_batch_size(config, world_size: int) -> int:
+    """Calculate effective batch size with gradient accumulation."""
+    return (
+        config.training.batch_size_per_gpu 
+        * world_size 
+        * config.training.gradient_accumulation_steps
+    )
+
+
+def print_training_info(config, world_size: int, model, device):
+    """Print training configuration summary."""
+    effective_batch = get_effective_batch_size(config, world_size)
+    
+    logger.info("=" * 60)
+    logger.info("TRAINING CONFIGURATION (per methodology Section 11)")
+    logger.info("=" * 60)
+    logger.info(f"  Device:                     {device}")
+    logger.info(f"  World size (GPUs):          {world_size}")
+    logger.info(f"  Batch size per GPU:         {config.training.batch_size_per_gpu}")
+    logger.info(f"  Gradient accumulation:      {config.training.gradient_accumulation_steps}")
+    logger.info(f"  Effective batch size:       {effective_batch}")
+    logger.info(f"  Mixed precision (FP16):     {config.training.fp16}")
+    logger.info(f"  Gradient checkpointing:     {config.training.gradient_checkpointing}")
+    logger.info(f"  DeepSpeed ZeRO:             {getattr(config.deepspeed, 'enabled', False)}")
+    logger.info(f"  Learning rate:              {config.training.learning_rate}")
+    logger.info(f"  Warmup ratio:               {config.training.warmup_ratio}")
+    logger.info(f"  Weight decay:               {config.training.weight_decay}")
+    logger.info(f"  Dataloader workers:         {config.training.dataloader_num_workers}")
+    logger.info("=" * 60)
+    
+    # Model info
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"  Total parameters:           {total_params:,}")
+    logger.info(f"  Trainable parameters:       {trainable_params:,}")
+    logger.info("=" * 60)
 
 
 def setup_huggingface(config: MIMICCXRVQAConfig):
@@ -388,19 +493,39 @@ def train_epoch(
     epoch: int,
     config: MIMICCXRVQAConfig,
     scaler: Optional[GradScaler] = None,
-    global_step: int = 0
+    global_step: int = 0,
+    local_rank: int = 0,
+    use_deepspeed: bool = False
 ) -> tuple[float, int]:
-    """Train for one epoch."""
+    """
+    Train for one epoch with gradient accumulation support.
+    
+    Implements methodology Section 11 optimizations:
+    - Gradient accumulation (default: 4 steps)
+    - Mixed precision (FP16)
+    - Gradient clipping
+    """
     model.train()
     
     total_loss = 0.0
     num_batches = 0
+    accumulated_loss = 0.0
     
-    progress_bar = tqdm(
-        dataloader,
-        desc=f"Epoch {epoch}",
-        leave=False
-    )
+    grad_accum_steps = config.training.gradient_accumulation_steps
+    
+    # Only show progress bar on main process
+    if is_main_process(local_rank):
+        progress_bar = tqdm(
+            dataloader,
+            desc=f"Epoch {epoch}",
+            leave=False
+        )
+    else:
+        progress_bar = dataloader
+    
+    # Zero gradients at start
+    if not use_deepspeed:
+        optimizer.zero_grad()
     
     for batch_idx, batch in enumerate(progress_bar):
         # Move data to device
@@ -414,64 +539,27 @@ def train_epoch(
         chexpert_labels = batch['chexpert_labels'].to(device)
         chexpert_mask = batch['chexpert_mask'].to(device)
         
+        if images is None:
+            continue
+        
         # Prepare VQA targets
         vqa_targets = {
-            'binary': answer_idx,  # Use same target for all heads for now
+            'binary': answer_idx,
             'category': answer_idx,
             'region': answer_idx,
             'severity': answer_idx,
         }
         
-        # Forward pass with mixed precision
-        optimizer.zero_grad()
-        
-        if scaler is not None and config.training.fp16:
-            with autocast():
-                if images is not None:
-                    outputs = model(
-                        images=images,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        scene_graphs=scene_graphs,
-                        token_type_ids=token_type_ids,
-                        question_types=question_types
-                    )
-                else:
-                    continue  # Skip if no images
-                
-                loss, loss_dict = criterion(
-                    outputs,
-                    vqa_targets,
-                    chexpert_labels,
-                    chexpert_mask,
-                    question_types
-                )
-            
-            # Backward pass
-            scaler.scale(loss).backward()
-            
-            # Gradient clipping
-            if config.training.max_grad_norm > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    config.training.max_grad_norm
-                )
-            
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            if images is not None:
-                outputs = model(
-                    images=images,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    scene_graphs=scene_graphs,
-                    token_type_ids=token_type_ids,
-                    question_types=question_types
-                )
-            else:
-                continue
+        # DeepSpeed handles mixed precision and gradient accumulation internally
+        if use_deepspeed:
+            outputs = model(
+                images=images,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                scene_graphs=scene_graphs,
+                token_type_ids=token_type_ids,
+                question_types=question_types
+            )
             
             loss, loss_dict = criterion(
                 outputs,
@@ -481,39 +569,131 @@ def train_epoch(
                 question_types
             )
             
-            loss.backward()
+            # DeepSpeed backward (handles gradient accumulation)
+            model.backward(loss)
+            model.step()
             
-            if config.training.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    config.training.max_grad_norm
+        # Standard PyTorch with gradient accumulation
+        else:
+            # Mixed precision forward pass
+            if scaler is not None and config.training.fp16:
+                with autocast():
+                    outputs = model(
+                        images=images,
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        scene_graphs=scene_graphs,
+                        token_type_ids=token_type_ids,
+                        question_types=question_types
+                    )
+                    
+                    loss, loss_dict = criterion(
+                        outputs,
+                        vqa_targets,
+                        chexpert_labels,
+                        chexpert_mask,
+                        question_types
+                    )
+                    
+                    # Scale loss for gradient accumulation
+                    loss = loss / grad_accum_steps
+                
+                # Backward pass with scaled gradients
+                scaler.scale(loss).backward()
+                
+            else:
+                outputs = model(
+                    images=images,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    scene_graphs=scene_graphs,
+                    token_type_ids=token_type_ids,
+                    question_types=question_types
                 )
+                
+                loss, loss_dict = criterion(
+                    outputs,
+                    vqa_targets,
+                    chexpert_labels,
+                    chexpert_mask,
+                    question_types
+                )
+                
+                # Scale loss for gradient accumulation
+                loss = loss / grad_accum_steps
+                loss.backward()
             
-            optimizer.step()
+            # Accumulate loss for logging (unscaled)
+            accumulated_loss += loss.item() * grad_accum_steps
+            
+            # Optimizer step at accumulation boundary
+            if (batch_idx + 1) % grad_accum_steps == 0:
+                if scaler is not None and config.training.fp16:
+                    # Gradient clipping
+                    if config.training.max_grad_norm > 0:
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            config.training.max_grad_norm
+                        )
+                    
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    if config.training.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(),
+                            config.training.max_grad_norm
+                        )
+                    optimizer.step()
+                
+                # Update scheduler per optimizer step
+                if scheduler is not None:
+                    scheduler.step()
+                
+                # Zero gradients for next accumulation
+                optimizer.zero_grad()
+                
+                # Track loss per actual step
+                total_loss += accumulated_loss
+                accumulated_loss = 0.0
+                num_batches += 1
+                global_step += 1
         
-        # Update scheduler
-        if scheduler is not None:
-            scheduler.step()
+        # DeepSpeed tracks its own steps
+        if use_deepspeed:
+            total_loss += loss.item()
+            num_batches += 1
+            global_step += 1
         
-        # Update metrics
-        total_loss += loss.item()
-        num_batches += 1
-        global_step += 1
+        # Update progress bar (main process only)
+        if is_main_process(local_rank) and hasattr(progress_bar, 'set_postfix'):
+            progress_bar.set_postfix({
+                'loss': f'{loss.item() * (grad_accum_steps if not use_deepspeed else 1):.4f}',
+                'vqa': f'{loss_dict.get("vqa_loss", 0):.4f}',
+                'chex': f'{loss_dict.get("chexpert_loss", 0):.4f}',
+                'step': global_step
+            })
         
-        # Update progress bar
-        progress_bar.set_postfix({
-            'loss': f'{loss.item():.4f}',
-            'vqa': f'{loss_dict.get("vqa_loss", 0):.4f}',
-            'chex': f'{loss_dict.get("chexpert_loss", 0):.4f}'
-        })
-        
-        # Log to wandb
-        if WANDB_AVAILABLE and config.wandb.enabled and global_step % config.training.logging_steps == 0:
+        # Log to wandb (main process only, every logging_steps actual steps)
+        if (is_main_process(local_rank) and 
+            WANDB_AVAILABLE and 
+            config.wandb.enabled and 
+            global_step > 0 and 
+            global_step % config.training.logging_steps == 0):
+            
+            # Get learning rate
+            if use_deepspeed:
+                lr = model.get_lr()[0] if hasattr(model, 'get_lr') else config.training.learning_rate
+            else:
+                lr = optimizer.param_groups[0]['lr']
+            
             wandb.log({
-                'train/loss': loss.item(),
+                'train/loss': loss.item() * (grad_accum_steps if not use_deepspeed else 1),
                 'train/vqa_loss': loss_dict.get('vqa_loss', 0).item() if torch.is_tensor(loss_dict.get('vqa_loss', 0)) else loss_dict.get('vqa_loss', 0),
                 'train/chexpert_loss': loss_dict.get('chexpert_loss', 0).item() if torch.is_tensor(loss_dict.get('chexpert_loss', 0)) else loss_dict.get('chexpert_loss', 0),
-                'train/learning_rate': optimizer.param_groups[0]['lr'],
+                'train/learning_rate': lr,
+                'train/epoch': epoch,
                 'global_step': global_step,
             })
     
@@ -664,14 +844,41 @@ def check_data_readiness(config) -> bool:
 
 
 def main(args):
-    """Main training function."""
+    """Main training function with distributed training support."""
+    # Set optimal environment variables
+    set_optimal_environment()
+    
     # Load config
     if args.config and os.path.exists(args.config):
         config = load_config_from_file(args.config)
     else:
         config = get_default_config()
     
-    # Override config with command line args
+    # ========================================
+    # HARDWARE AUTO-DETECTION AND OPTIMIZATION
+    # ========================================
+    if args.auto_optimize:
+        hardware_info = detect_hardware()
+        
+        # Print hardware info (before distributed init, so only once)
+        if int(os.environ.get('LOCAL_RANK', 0)) == 0:
+            print_hardware_info(hardware_info)
+        
+        # Apply optimal settings to config
+        config = optimize_for_hardware(config, auto_detect=True)
+        
+        # Auto-enable DeepSpeed for multi-GPU if not explicitly set
+        if not args.use_deepspeed and not args.use_ddp:
+            if hardware_info.num_gpus > 1 and DEEPSPEED_AVAILABLE:
+                args.use_deepspeed = True
+                logger.info(f"Auto-enabled DeepSpeed ZeRO-{hardware_info.deepspeed_stage} for {hardware_info.num_gpus} GPUs")
+            elif hardware_info.num_gpus > 1:
+                args.use_ddp = True
+                logger.info(f"Auto-enabled DDP for {hardware_info.num_gpus} GPUs")
+    else:
+        hardware_info = None
+    
+    # Override config with command line args (takes precedence over auto-detect)
     if args.mimic_cxr_path:
         config.data.mimic_cxr_jpg_path = args.mimic_cxr_path
     if args.mimic_qa_path:
@@ -691,37 +898,63 @@ def main(args):
     if args.disable_wandb:
         config.wandb.enabled = False
     
-    # Check data readiness (unless skipped)
-    if not args.skip_data_check:
-        if not check_data_readiness(config):
-            logger.info("\nTo skip this check (not recommended), use --skip_data_check")
-            sys.exit(1)
-    else:
-        logger.warning("Skipping data readiness check (--skip_data_check)")
+    # Enable DeepSpeed if requested and available
+    use_deepspeed = args.use_deepspeed and DEEPSPEED_AVAILABLE
+    use_ddp = args.use_ddp and not use_deepspeed
+    
+    # Setup distributed training
+    local_rank, world_size, is_distributed = setup_distributed(args)
+    
+    # Only main process should check data and log
+    if is_main_process(local_rank):
+        # Check data readiness (unless skipped)
+        if not args.skip_data_check:
+            if not check_data_readiness(config):
+                logger.info("\nTo skip this check (not recommended), use --skip_data_check")
+                sys.exit(1)
+        else:
+            logger.warning("Skipping data readiness check (--skip_data_check)")
+    
+    # Sync all processes after data check
+    if is_distributed:
+        dist.barrier() if dist.is_initialized() else None
     
     # Setup
-    seed_everything(config.training.seed)
+    seed_everything(config.training.seed + local_rank)  # Different seed per rank for data augmentation
     
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    logger.info(f"Using device: {device}")
+    # Device setup
+    if torch.cuda.is_available():
+        if is_distributed:
+            device = torch.device(f'cuda:{local_rank}')
+            torch.cuda.set_device(device)
+        else:
+            device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
     
-    # Check for multi-GPU
-    n_gpus = torch.cuda.device_count()
-    logger.info(f"Number of GPUs: {n_gpus}")
+    if is_main_process(local_rank):
+        logger.info(f"Using device: {device}")
+        logger.info(f"World size (total GPUs): {world_size}")
+        logger.info(f"Local rank: {local_rank}")
+        logger.info(f"Distributed training: {is_distributed}")
+        logger.info(f"DeepSpeed enabled: {use_deepspeed}")
+        logger.info(f"DDP enabled: {use_ddp}")
     
-    # Initialize wandb
-    wandb_run = init_wandb(config)
-    
-    # Create output directory
-    os.makedirs(config.training.output_dir, exist_ok=True)
-    
-    # Save config
-    with open(os.path.join(config.training.output_dir, 'config.json'), 'w') as f:
-        json.dump(config.to_dict(), f, indent=2)
+    # Initialize wandb (main process only)
+    wandb_run = None
+    if is_main_process(local_rank):
+        wandb_run = init_wandb(config)
+        
+        # Create output directory
+        os.makedirs(config.training.output_dir, exist_ok=True)
+        
+        # Save config
+        with open(os.path.join(config.training.output_dir, 'config.json'), 'w') as f:
+            json.dump(config.to_dict(), f, indent=2)
     
     # Load datasets
-    logger.info("Loading datasets...")
+    if is_main_process(local_rank):
+        logger.info("Loading datasets...")
     
     train_dataset = MIMICCXRVQADataset(
         mimic_cxr_path=config.data.mimic_cxr_jpg_path,
@@ -749,16 +982,37 @@ def main(args):
         max_samples=args.max_samples // 10 if args.max_samples else None
     )
     
-    logger.info(f"Train samples: {len(train_dataset)}")
-    logger.info(f"Val samples: {len(val_dataset)}")
+    if is_main_process(local_rank):
+        logger.info(f"Train samples: {len(train_dataset)}")
+        logger.info(f"Val samples: {len(val_dataset)}")
     
-    # Create dataloaders
+    # Create distributed samplers for multi-GPU training
+    train_sampler = None
+    val_sampler = None
+    
+    if is_distributed and not use_deepspeed:
+        train_sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world_size,
+            rank=local_rank,
+            shuffle=True,
+            seed=config.training.seed
+        )
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=local_rank,
+            shuffle=False
+        )
+    
+    # Create dataloaders with distributed samplers
     train_dataloader = create_dataloader(
         train_dataset,
         batch_size=config.training.batch_size_per_gpu,
-        shuffle=True,
+        shuffle=(train_sampler is None),  # Don't shuffle if using sampler
         num_workers=config.training.dataloader_num_workers,
-        pin_memory=config.training.dataloader_pin_memory
+        pin_memory=config.training.dataloader_pin_memory,
+        sampler=train_sampler
     )
     
     val_dataloader = create_dataloader(
@@ -766,11 +1020,13 @@ def main(args):
         batch_size=config.training.batch_size_per_gpu * 2,
         shuffle=False,
         num_workers=config.training.dataloader_num_workers,
-        pin_memory=config.training.dataloader_pin_memory
+        pin_memory=config.training.dataloader_pin_memory,
+        sampler=val_sampler
     )
     
     # Initialize model
-    logger.info("Initializing model...")
+    if is_main_process(local_rank):
+        logger.info("Initializing model...")
     
     model = MIMICCXRVQAModel(
         visual_backbone=config.model.visual_backbone,
@@ -793,23 +1049,8 @@ def main(args):
     )
     
     # Enable gradient checkpointing if configured
-    if config.training.gradient_checkpointing:
+    if config.training.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
-    
-    # Multi-GPU
-    if n_gpus > 1:
-        model = nn.DataParallel(model)
-    
-    model = model.to(device)
-    
-    # Log model params
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
-    
-    if WANDB_AVAILABLE and config.wandb.enabled and config.wandb.watch_model:
-        wandb.watch(model, log="all", log_freq=config.wandb.watch_log_freq)
     
     # Loss function
     criterion = MultiTaskLoss(
@@ -821,40 +1062,133 @@ def main(args):
         severity_weight=config.training.severity_head_weight,
     )
     
-    # Optimizer
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay
-    )
-    
-    # Scheduler
-    total_steps = len(train_dataloader) * config.training.num_epochs
+    # Calculate scheduler steps (accounting for gradient accumulation)
+    steps_per_epoch = len(train_dataloader) // config.training.gradient_accumulation_steps
+    total_steps = steps_per_epoch * config.training.num_epochs
     warmup_steps = int(total_steps * config.training.warmup_ratio)
     
-    from torch.optim.lr_scheduler import OneCycleLR
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=config.training.learning_rate,
-        total_steps=total_steps,
-        pct_start=config.training.warmup_ratio,
-        anneal_strategy='cos'
-    )
+    # DeepSpeed initialization
+    if use_deepspeed:
+        if is_main_process(local_rank):
+            logger.info("Initializing DeepSpeed...")
+        
+        # Load DeepSpeed config (optimized for hardware if auto_optimize)
+        ds_config_path = args.deepspeed_config or config.deepspeed.config_path
+        
+        if args.auto_optimize and hardware_info is not None:
+            # Generate optimized DeepSpeed config based on hardware
+            ds_config = get_deepspeed_config_for_hardware(hardware_info, ds_config_path)
+            if is_main_process(local_rank):
+                logger.info(f"Using hardware-optimized DeepSpeed config (ZeRO stage {hardware_info.deepspeed_stage})")
+        else:
+            with open(ds_config_path) as f:
+                ds_config = json.load(f)
+        
+        # Update DeepSpeed config with training parameters
+        ds_config['train_micro_batch_size_per_gpu'] = config.training.batch_size_per_gpu
+        ds_config['gradient_accumulation_steps'] = config.training.gradient_accumulation_steps
+        ds_config['optimizer']['params']['lr'] = config.training.learning_rate
+        ds_config['optimizer']['params']['weight_decay'] = config.training.weight_decay
+        ds_config['scheduler']['params']['warmup_num_steps'] = warmup_steps
+        ds_config['scheduler']['params']['total_num_steps'] = total_steps
+        ds_config['scheduler']['params']['warmup_max_lr'] = config.training.learning_rate
+        ds_config['fp16']['enabled'] = config.training.fp16
+        
+        # Initialize DeepSpeed
+        model, optimizer, _, scheduler = deepspeed.initialize(
+            model=model,
+            model_parameters=model.parameters(),
+            config=ds_config,
+        )
+        
+        scaler = None  # DeepSpeed handles FP16 internally
+        
+    # DDP or DataParallel setup
+    elif use_ddp:
+        if is_main_process(local_rank):
+            logger.info("Initializing DistributedDataParallel...")
+        
+        model = model.to(device)
+        model = DDP(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=True
+        )
+        
+        # Standard optimizer and scheduler
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.training.learning_rate,
+            weight_decay=config.training.weight_decay
+        )
+        
+        from torch.optim.lr_scheduler import OneCycleLR
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=config.training.learning_rate,
+            total_steps=total_steps,
+            pct_start=config.training.warmup_ratio,
+            anneal_strategy='cos'
+        )
+        
+        scaler = GradScaler() if config.training.fp16 else None
+        
+    # Single GPU / DataParallel fallback
+    else:
+        model = model.to(device)
+        
+        # Multi-GPU with DataParallel (less efficient than DDP)
+        n_gpus = torch.cuda.device_count()
+        if n_gpus > 1 and not is_distributed:
+            if is_main_process(local_rank):
+                logger.warning(f"Using DataParallel with {n_gpus} GPUs. Consider using --use_deepspeed or --use_ddp for better performance.")
+            model = nn.DataParallel(model)
+        
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.training.learning_rate,
+            weight_decay=config.training.weight_decay
+        )
+        
+        from torch.optim.lr_scheduler import OneCycleLR
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=config.training.learning_rate,
+            total_steps=total_steps,
+            pct_start=config.training.warmup_ratio,
+            anneal_strategy='cos'
+        )
+        
+        scaler = GradScaler() if config.training.fp16 else None
     
-    # Mixed precision scaler
-    scaler = GradScaler() if config.training.fp16 else None
+    # Print training info (main process only)
+    if is_main_process(local_rank):
+        print_training_info(config, world_size, model, device)
+        
+        if WANDB_AVAILABLE and config.wandb.enabled and config.wandb.watch_model:
+            wandb.watch(model, log="all", log_freq=config.wandb.watch_log_freq)
     
     # Training loop
     best_metric = 0.0
     global_step = 0
     epochs_without_improvement = 0
     
-    logger.info("Starting training...")
+    if is_main_process(local_rank):
+        logger.info("Starting training...")
+        logger.info(f"Effective batch size: {get_effective_batch_size(config, world_size)}")
+        logger.info(f"Steps per epoch: {len(train_dataloader) // config.training.gradient_accumulation_steps}")
+        logger.info(f"Total training steps: {total_steps}")
     
     for epoch in range(1, config.training.num_epochs + 1):
-        logger.info(f"\n{'='*50}")
-        logger.info(f"Epoch {epoch}/{config.training.num_epochs}")
-        logger.info(f"{'='*50}")
+        # Set epoch for distributed sampler
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        
+        if is_main_process(local_rank):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Epoch {epoch}/{config.training.num_epochs}")
+            logger.info(f"{'='*50}")
         
         # Train
         train_loss, global_step = train_epoch(
@@ -867,12 +1201,15 @@ def main(args):
             epoch=epoch,
             config=config,
             scaler=scaler,
-            global_step=global_step
+            global_step=global_step,
+            local_rank=local_rank,
+            use_deepspeed=use_deepspeed
         )
         
-        logger.info(f"Train Loss: {train_loss:.4f}")
+        if is_main_process(local_rank):
+            logger.info(f"Train Loss: {train_loss:.4f}")
         
-        # Validate
+        # Validate (all processes participate, but only main process logs)
         val_metrics = validate(
             model=model,
             dataloader=val_dataloader,
@@ -881,89 +1218,114 @@ def main(args):
             config=config
         )
         
-        logger.info(f"Val Loss: {val_metrics['loss']:.4f}")
-        logger.info(f"Val Accuracy: {val_metrics.get('accuracy', 0):.4f}")
-        logger.info(f"Val Binary Acc: {val_metrics.get('binary_accuracy', 0):.4f}")
+        # Only main process handles logging and checkpointing
+        if is_main_process(local_rank):
+            logger.info(f"Val Loss: {val_metrics['loss']:.4f}")
+            logger.info(f"Val Accuracy: {val_metrics.get('accuracy', 0):.4f}")
+            logger.info(f"Val Binary Acc: {val_metrics.get('binary_accuracy', 0):.4f}")
+            
+            # Log to wandb
+            if WANDB_AVAILABLE and config.wandb.enabled:
+                wandb.log({
+                    'epoch': epoch,
+                    'train/epoch_loss': train_loss,
+                    'val/loss': val_metrics['loss'],
+                    'val/accuracy': val_metrics.get('accuracy', 0),
+                    'val/binary_accuracy': val_metrics.get('binary_accuracy', 0),
+                    'val/category_f1': val_metrics.get('category_f1', 0),
+                    'val/chexpert_auroc': val_metrics.get('chexpert_auroc', 0),
+                })
+            
+            # Check for best model
+            current_metric = val_metrics.get(config.training.metric_for_best_model, 0)
+            is_best = current_metric > best_metric
+            
+            if is_best:
+                best_metric = current_metric
+                epochs_without_improvement = 0
+                logger.info(f"New best {config.training.metric_for_best_model}: {best_metric:.4f}")
+            else:
+                epochs_without_improvement += 1
+            
+            # Save checkpoint
+            if global_step % config.training.save_steps == 0 or is_best:
+                # Get the underlying model for saving
+                model_to_save = model
+                if use_deepspeed:
+                    model_to_save = model.module
+                elif hasattr(model, 'module'):
+                    model_to_save = model.module
+                
+                save_checkpoint(
+                    model=model_to_save,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    epoch=epoch,
+                    global_step=global_step,
+                    metrics=val_metrics,
+                    config=config,
+                    is_best=is_best
+                )
+            
+            # Push to hub
+            if is_best and config.training.hub_model_id:
+                model_to_save = model.module if hasattr(model, 'module') else model
+                push_to_hub(
+                    model=model_to_save,
+                    config=config,
+                    metrics=val_metrics,
+                    commit_message=f"Epoch {epoch} - Acc: {val_metrics.get('accuracy', 0):.4f}"
+                )
+            
+            # Early stopping check
+            if epochs_without_improvement >= config.training.early_stopping_patience:
+                logger.info(f"Early stopping after {epochs_without_improvement} epochs without improvement")
+                break
         
-        # Log to wandb
-        if WANDB_AVAILABLE and config.wandb.enabled:
-            wandb.log({
-                'epoch': epoch,
-                'train/epoch_loss': train_loss,
-                'val/loss': val_metrics['loss'],
-                'val/accuracy': val_metrics.get('accuracy', 0),
-                'val/binary_accuracy': val_metrics.get('binary_accuracy', 0),
-                'val/category_f1': val_metrics.get('category_f1', 0),
-                'val/chexpert_auroc': val_metrics.get('chexpert_auroc', 0),
-            })
-        
-        # Check for best model
-        current_metric = val_metrics.get(config.training.metric_for_best_model, 0)
-        is_best = current_metric > best_metric
-        
-        if is_best:
-            best_metric = current_metric
-            epochs_without_improvement = 0
-            logger.info(f"New best {config.training.metric_for_best_model}: {best_metric:.4f}")
-        else:
-            epochs_without_improvement += 1
-        
-        # Save checkpoint
-        if global_step % config.training.save_steps == 0 or is_best:
-            save_checkpoint(
-                model=model.module if hasattr(model, 'module') else model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                global_step=global_step,
-                metrics=val_metrics,
-                config=config,
-                is_best=is_best
-            )
-        
-        # Push to hub
-        if is_best and config.training.hub_model_id:
-            push_to_hub(
-                model=model.module if hasattr(model, 'module') else model,
-                config=config,
-                metrics=val_metrics,
-                commit_message=f"Epoch {epoch} - Acc: {val_metrics.get('accuracy', 0):.4f}"
-            )
-        
-        # Early stopping
-        if epochs_without_improvement >= config.training.early_stopping_patience:
-            logger.info(f"Early stopping after {epochs_without_improvement} epochs without improvement")
-            break
+        # Sync all processes at end of epoch
+        if is_distributed:
+            dist.barrier() if dist.is_initialized() else None
     
-    # Final save
-    logger.info("\nTraining complete!")
-    logger.info(f"Best {config.training.metric_for_best_model}: {best_metric:.4f}")
-    
-    save_checkpoint(
-        model=model.module if hasattr(model, 'module') else model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        epoch=epoch,
-        global_step=global_step,
-        metrics=val_metrics,
-        config=config,
-        is_best=False
-    )
-    
-    # Final push to hub
-    if config.training.hub_model_id:
-        push_to_hub(
-            model=model.module if hasattr(model, 'module') else model,
+    # Final save (main process only)
+    if is_main_process(local_rank):
+        logger.info("\nTraining complete!")
+        logger.info(f"Best {config.training.metric_for_best_model}: {best_metric:.4f}")
+        
+        # Get the underlying model for saving
+        model_to_save = model
+        if use_deepspeed:
+            model_to_save = model.module
+        elif hasattr(model, 'module'):
+            model_to_save = model.module
+        
+        save_checkpoint(
+            model=model_to_save,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            epoch=epoch,
+            global_step=global_step,
+            metrics=val_metrics,
             config=config,
-            metrics={'best_accuracy': best_metric, **val_metrics},
-            commit_message=f"Final model - Best Acc: {best_metric:.4f}"
+            is_best=False
         )
+        
+        # Final push to hub
+        if config.training.hub_model_id:
+            push_to_hub(
+                model=model_to_save,
+                config=config,
+                metrics={'best_accuracy': best_metric, **val_metrics},
+                commit_message=f"Final model - Best Acc: {best_metric:.4f}"
+            )
+        
+        # Close wandb
+        if WANDB_AVAILABLE and config.wandb.enabled:
+            wandb.finish()
+        
+        logger.info("Done!")
     
-    # Close wandb
-    if WANDB_AVAILABLE and config.wandb.enabled:
-        wandb.finish()
-    
-    logger.info("Done!")
+    # Cleanup distributed training
+    cleanup_distributed()
 
 
 if __name__ == "__main__":
@@ -983,6 +1345,22 @@ if __name__ == "__main__":
     parser.add_argument('--learning_rate', type=float, help='Learning rate')
     parser.add_argument('--max_samples', type=int, default=None, help='Max samples (for debugging)')
     
+    # Distributed training (per methodology Section 11)
+    parser.add_argument('--use_deepspeed', action='store_true',
+                       help='Enable DeepSpeed ZeRO-2 (recommended for 4+ GPUs)')
+    parser.add_argument('--deepspeed_config', type=str, default='configs/deepspeed_config.json',
+                       help='Path to DeepSpeed config JSON')
+    parser.add_argument('--use_ddp', action='store_true',
+                       help='Enable DistributedDataParallel (alternative to DeepSpeed)')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                       help='Local rank for distributed training (set by launcher)')
+    
+    # Hardware optimization
+    parser.add_argument('--auto_optimize', action='store_true', default=True,
+                       help='Auto-detect hardware and optimize settings (default: enabled)')
+    parser.add_argument('--no_auto_optimize', action='store_false', dest='auto_optimize',
+                       help='Disable hardware auto-optimization')
+    
     # Hub
     parser.add_argument('--hub_model_id', type=str, help='Hugging Face Hub model ID')
     
@@ -995,6 +1373,10 @@ if __name__ == "__main__":
                        help='Skip data readiness check (not recommended)')
     
     args = parser.parse_args()
+    
+    # DeepSpeed adds local_rank argument automatically
+    if args.local_rank == -1:
+        args.local_rank = int(os.environ.get('LOCAL_RANK', 0))
     
     main(args)
 

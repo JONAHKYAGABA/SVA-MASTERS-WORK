@@ -401,12 +401,13 @@ fi
 # Set wandb mode
 export WANDB_MODE=online
 
-# Run training
-python train_mimic_cxr.py --config configs/default_config.yaml "$@"
+# Launch distributed training with hardware auto-detection
+# This automatically detects GPUs, memory, and optimizes settings
+./scripts/launch_distributed_training.sh --config configs/default_config.yaml "\$@"
 EOF
 chmod +x run_training.sh
 
-log_info "Created run_training.sh"
+log_info "Created run_training.sh (with hardware auto-optimization)"
 
 # =============================================================================
 # Summary
@@ -430,7 +431,7 @@ echo -e "${YELLOW}NEXT STEPS:${NC}"
 echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
 echo -e "\n${CYAN}1. Configure your secrets:${NC}"
-echo -e "   ${GREEN}./setup_gcp.sh --configure-secrets${NC}"
+echo -e "   ${GREEN}./scripts/setup_gcp.sh --configure-secrets${NC}"
 echo -e "   Or manually edit ~/.env"
 
 echo -e "\n${CYAN}2. Activate the environment:${NC}"
@@ -439,12 +440,22 @@ echo -e "   ${GREEN}conda activate mimic-vqa${NC}"
 echo -e "\n${CYAN}3. Verify data setup:${NC}"
 echo -e "   ${GREEN}python analyze_data.py --mimic_cxr_path $MIMIC_CXR_PATH --mimic_qa_path $MIMIC_QA_PATH${NC}"
 
-echo -e "\n${CYAN}4. Start training:${NC}"
-echo -e "   ${GREEN}./run_training.sh${NC}"
-echo -e "   Or with custom config:"
-echo -e "   ${GREEN}python train_mimic_cxr.py --config configs/default_config.yaml${NC}"
+echo -e "\n${CYAN}4. Check hardware optimization:${NC}"
+echo -e "   ${GREEN}python -m utils.hardware_utils${NC}"
+echo -e "   (Shows detected GPUs, memory, and optimal settings)"
 
-echo -e "\n${CYAN}5. Monitor training:${NC}"
+echo -e "\n${CYAN}5. Start training (auto-optimized):${NC}"
+echo -e "   ${GREEN}./run_training.sh${NC}"
+echo -e "   Or with distributed launcher directly:"
+echo -e "   ${GREEN}./scripts/launch_distributed_training.sh --config configs/default_config.yaml${NC}"
+echo -e "   "
+echo -e "   Hardware auto-detection will:"
+echo -e "   - Detect your 4x NVIDIA L4 GPUs (96GB total)"
+echo -e "   - Set batch_size=16/GPU, grad_accum=4 (effective 256)"
+echo -e "   - Enable DeepSpeed ZeRO-2 for optimal memory"
+echo -e "   - Configure 12 DataLoader workers"
+
+echo -e "\n${CYAN}6. Monitor training:${NC}"
 echo -e "   - Wandb: https://wandb.ai/your-username/mimic-cxr-vqa"
 echo -e "   - GPU usage: ${GREEN}watch -n 1 nvidia-smi${NC}"
 

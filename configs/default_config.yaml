@@ -61,11 +61,17 @@ training:
   # Output
   output_dir: "./checkpoints/mimic-cxr-vqa"
   
-  # Batch size
+  # ========================================
+  # BATCH SIZE & GRADIENT ACCUMULATION
+  # Per methodology Section 11.2:
+  # - batch_size_per_gpu: 16
+  # - gradient_accumulation_steps: 4
+  # - 4 GPUs -> effective_batch_size = 16 * 4 * 4 = 256
+  # ========================================
   batch_size_per_gpu: 16
   gradient_accumulation_steps: 4
   
-  # Learning rate
+  # Learning rate (methodology: 5e-5 with cosine warmup)
   learning_rate: 5.0e-5
   weight_decay: 0.01
   warmup_ratio: 0.1
@@ -74,10 +80,12 @@ training:
   # Epochs
   num_epochs: 20
   
-  # Mixed precision
+  # ========================================
+  # OPTIMIZATION FLAGS (methodology Section 11.1)
+  # - Mixed Precision: 1.5-2x speedup
+  # - Gradient Checkpointing: enables 2x batch
+  # ========================================
   fp16: true
-  
-  # Gradient checkpointing (saves memory)
   gradient_checkpointing: true
   
   # Loss weights
@@ -101,10 +109,15 @@ training:
   # Early stopping
   early_stopping_patience: 5
   
-  # Data loading
-  dataloader_num_workers: 8
+  # ========================================
+  # DATA LOADING (methodology Section 11.2)
+  # - num_workers: 12 (3 per GPU for 4 GPUs)
+  # - pin_memory: true (faster GPU transfer)
+  # - prefetch_factor: 4 (preload batches)
+  # ========================================
+  dataloader_num_workers: 12
   dataloader_pin_memory: true
-  dataloader_prefetch_factor: 2
+  dataloader_prefetch_factor: 4
   
   # Hugging Face Hub (optional)
   hub_model_id: ""  # e.g., "your-username/mimic-cxr-vqa-ssg"
@@ -126,8 +139,13 @@ wandb:
   watch_log_freq: 1000
   log_model: true
 
+# ========================================
+# DEEPSPEED CONFIGURATION (methodology Section 11)
+# Auto-enabled when multiple GPUs detected
+# ZeRO Stage 2: 30-40% memory savings
+# ========================================
 deepspeed:
-  enabled: false
+  enabled: true  # Auto-enabled for multi-GPU
   config_path: "configs/deepspeed_config.json"
-  stage: 2
+  stage: 2  # ZeRO stage (2 recommended, 3 for very limited memory)
 

@@ -29,6 +29,7 @@ import warnings
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -753,6 +754,133 @@ def generate_evaluation_report(
     return report
 
 
+def evaluate_cross_dataset(
+    model: nn.Module,
+    dataset_name: str,
+    dataset_path: str,
+    device: torch.device,
+    batch_size: int = 32,
+    num_workers: int = 4
+) -> Dict[str, Any]:
+    """
+    Evaluate model on external dataset (VQA-RAD or SLAKE) for cross-dataset generalization.
+    
+    From methodology Section 16.3:
+    Zero-shot cross-dataset evaluation tests generalization without fine-tuning.
+    
+    Args:
+        model: Trained VQA model
+        dataset_name: 'vqa_rad' or 'slake'
+        dataset_path: Path to dataset
+        device: torch device
+        batch_size: Batch size for evaluation
+        num_workers: DataLoader workers
+    
+    Returns:
+        Dict with cross-dataset metrics
+    """
+    from data.external_datasets import get_external_dataset, create_external_dataloader
+    from utils.nlp_metrics import compute_all_nlp_metrics
+    
+    logger.info(f"\n{'='*60}")
+    logger.info(f"CROSS-DATASET EVALUATION: {dataset_name.upper()}")
+    logger.info(f"{'='*60}")
+    
+    # Load external dataset
+    try:
+        dataset = get_external_dataset(
+            dataset_name=dataset_name,
+            data_path=dataset_path,
+            split='test',
+        )
+    except Exception as e:
+        logger.error(f"Failed to load {dataset_name}: {e}")
+        return {'error': str(e), 'dataset': dataset_name}
+    
+    if len(dataset) == 0:
+        logger.error(f"No samples found in {dataset_name}")
+        return {'error': 'Empty dataset', 'dataset': dataset_name}
+    
+    logger.info(f"Loaded {len(dataset)} samples from {dataset_name}")
+    
+    dataloader = create_external_dataloader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        shuffle=False
+    )
+    
+    model.eval()
+    all_predictions = []
+    all_answers = []
+    all_correct_binary = []
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc=f"Evaluating {dataset_name}"):
+            images = batch['images'].to(device)
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            
+            # Forward pass
+            outputs = model(
+                images=images,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                scene_graphs=batch['scene_graphs'],
+                question_types=batch['head_types'],
+            )
+            
+            # Get predictions based on head types
+            batch_preds = []
+            for i, head_type in enumerate(batch['head_types']):
+                if head_type == 'binary' and 'binary' in outputs.vqa_outputs:
+                    pred_logits = outputs.vqa_outputs['binary'][i]
+                    pred_idx = pred_logits.argmax().item()
+                    pred_text = 'yes' if pred_idx == 1 else 'no'
+                else:
+                    # Default to binary head
+                    pred_text = 'yes'
+                
+                batch_preds.append(pred_text)
+            
+            all_predictions.extend(batch_preds)
+            all_answers.extend(batch['answers'])
+            
+            # Track binary correctness
+            for pred, ans, ans_type in zip(batch_preds, batch['answers'], batch['answer_types']):
+                if ans_type == 'CLOSED':
+                    ans_lower = ans.lower().strip()
+                    pred_lower = pred.lower().strip()
+                    is_correct = (pred_lower == ans_lower) or \
+                                 (pred_lower in ['yes', 'no'] and ans_lower in ['yes', 'no'] and pred_lower == ans_lower)
+                    all_correct_binary.append(int(is_correct))
+    
+    # Compute NLP metrics
+    nlp_metrics = compute_all_nlp_metrics(
+        predictions=all_predictions,
+        references=all_answers,
+        compute_bertscore=False  # Skip for speed in cross-dataset
+    )
+    
+    # Compute binary accuracy for closed questions
+    binary_accuracy = np.mean(all_correct_binary) if all_correct_binary else 0.0
+    
+    results = {
+        'dataset': dataset_name,
+        'num_samples': len(dataset),
+        'binary_accuracy': binary_accuracy,
+        **nlp_metrics
+    }
+    
+    logger.info(f"\n{dataset_name.upper()} Results:")
+    logger.info(f"  Samples:          {len(dataset)}")
+    logger.info(f"  Binary Accuracy:  {binary_accuracy*100:.2f}%")
+    logger.info(f"  Exact Match:      {nlp_metrics.get('exact_match', 0)*100:.2f}%")
+    logger.info(f"  Token F1:         {nlp_metrics.get('token_f1', 0)*100:.2f}%")
+    
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description='Evaluate MIMIC-CXR VQA Model')
     
@@ -768,6 +896,14 @@ def main():
                        help='Evaluation batch size')
     parser.add_argument('--compute_attention', action='store_true',
                        help='Compute attention-based explainability metrics')
+    
+    # Cross-dataset evaluation arguments
+    parser.add_argument('--cross_dataset', action='store_true',
+                       help='Run cross-dataset evaluation on VQA-RAD and SLAKE')
+    parser.add_argument('--vqa_rad_path', type=str, default='./external_datasets/vqa_rad',
+                       help='Path to VQA-RAD dataset')
+    parser.add_argument('--slake_path', type=str, default='./external_datasets/slake',
+                       help='Path to SLAKE dataset')
     
     args = parser.parse_args()
     
@@ -812,8 +948,8 @@ def main():
     
     logger.info(f"Test samples: {len(test_dataset)}")
     
-    # Evaluate
-    logger.info("Running evaluation...")
+    # Evaluate on MIMIC-CXR test set
+    logger.info("Running evaluation on MIMIC-CXR test set...")
     results = evaluate_model(
         model=model,
         dataloader=test_dataloader,
@@ -825,7 +961,67 @@ def main():
     report_path = output_dir / 'evaluation_report.json'
     generate_evaluation_report(results, str(report_path))
     
-    logger.info("Evaluation complete!")
+    # Cross-dataset evaluation (methodology Section 16.3)
+    if args.cross_dataset:
+        logger.info("\n" + "=" * 70)
+        logger.info("CROSS-DATASET EVALUATION (Zero-Shot Generalization)")
+        logger.info("=" * 70)
+        
+        cross_dataset_results = {}
+        
+        # Check and evaluate on VQA-RAD
+        from data.external_datasets import check_external_datasets
+        availability = check_external_datasets(str(Path(args.vqa_rad_path).parent))
+        
+        if availability.get('vqa_rad', False):
+            vqa_rad_results = evaluate_cross_dataset(
+                model=model,
+                dataset_name='vqa_rad',
+                dataset_path=args.vqa_rad_path,
+                device=device,
+                batch_size=args.batch_size,
+            )
+            cross_dataset_results['vqa_rad'] = vqa_rad_results
+        else:
+            logger.warning("VQA-RAD dataset not found. Skipping.")
+            logger.warning(f"  Expected path: {args.vqa_rad_path}")
+            logger.warning("  Download from: https://osf.io/89kps/")
+        
+        # Check and evaluate on SLAKE
+        if availability.get('slake', False):
+            slake_results = evaluate_cross_dataset(
+                model=model,
+                dataset_name='slake',
+                dataset_path=args.slake_path,
+                device=device,
+                batch_size=args.batch_size,
+            )
+            cross_dataset_results['slake'] = slake_results
+        else:
+            logger.warning("SLAKE dataset not found. Skipping.")
+            logger.warning(f"  Expected path: {args.slake_path}")
+            logger.warning("  Download from: https://www.med-vqa.com/slake/")
+        
+        # Save cross-dataset results
+        if cross_dataset_results:
+            cross_report_path = output_dir / 'cross_dataset_results.json'
+            with open(cross_report_path, 'w') as f:
+                json.dump(cross_dataset_results, f, indent=2, default=str)
+            logger.info(f"\nCross-dataset results saved to: {cross_report_path}")
+            
+            # Print summary
+            logger.info("\n" + "=" * 70)
+            logger.info("CROSS-DATASET SUMMARY")
+            logger.info("=" * 70)
+            for ds_name, ds_results in cross_dataset_results.items():
+                if 'error' not in ds_results:
+                    logger.info(f"\n{ds_name.upper()}:")
+                    logger.info(f"  Binary Accuracy: {ds_results.get('binary_accuracy', 0)*100:.2f}%")
+                    logger.info(f"  Exact Match:     {ds_results.get('exact_match', 0)*100:.2f}%")
+    
+    logger.info("\n" + "=" * 70)
+    logger.info("EVALUATION COMPLETE!")
+    logger.info("=" * 70)
 
 
 if __name__ == '__main__':
