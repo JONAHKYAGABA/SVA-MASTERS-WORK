@@ -22,6 +22,12 @@ Usage:
     
     # Step 3: Evaluate model
     python evaluate.py --model_path ./checkpoints/best_model --config configs/default_config.yaml
+
+Environment Variables (can be set in ~/.env):
+    HF_TOKEN        - HuggingFace API token for model upload
+    WANDB_API_KEY   - Weights & Biases API key for experiment tracking
+    WANDB_ENTITY    - Wandb username or team name
+    WANDB_PROJECT   - Wandb project name
 """
 
 import os
@@ -39,6 +45,30 @@ from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 
+# Load environment variables from .env file
+def load_env_file():
+    """Load environment variables from ~/.env file."""
+    env_paths = [
+        Path.home() / '.env',
+        Path('.env'),
+        Path('~/.env').expanduser(),
+    ]
+    
+    for env_path in env_paths:
+        if env_path.exists():
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        os.environ[key.strip()] = value.strip()
+            print(f"Loaded environment from: {env_path}")
+            return True
+    return False
+
+# Load .env file before other imports
+load_env_file()
+
 # Optional imports
 try:
     import wandb
@@ -48,7 +78,7 @@ except ImportError:
     print("wandb not available. Install with: pip install wandb")
 
 try:
-    from huggingface_hub import HfApi, create_repo, upload_folder
+    from huggingface_hub import HfApi, create_repo, upload_folder, login as hf_login
     HF_HUB_AVAILABLE = True
 except ImportError:
     HF_HUB_AVAILABLE = False
@@ -90,16 +120,46 @@ def seed_everything(seed: int = 42):
     torch.backends.cudnn.benchmark = False
 
 
+def setup_huggingface(config: MIMICCXRVQAConfig):
+    """Setup HuggingFace authentication."""
+    if not HF_HUB_AVAILABLE:
+        return
+    
+    hf_token = os.environ.get('HF_TOKEN') or config.training.hub_token
+    
+    if hf_token:
+        try:
+            hf_login(token=hf_token, add_to_git_credential=True)
+            logger.info("HuggingFace authentication successful")
+        except Exception as e:
+            logger.warning(f"HuggingFace login failed: {e}")
+    else:
+        logger.warning("HF_TOKEN not found. Set it in ~/.env or pass --hub_token")
+
+
 def init_wandb(config: MIMICCXRVQAConfig) -> Optional[Any]:
     """Initialize Weights & Biases tracking."""
     if not WANDB_AVAILABLE or not config.wandb.enabled:
         return None
     
+    # Get wandb settings from environment or config
+    wandb_api_key = os.environ.get('WANDB_API_KEY')
+    wandb_entity = os.environ.get('WANDB_ENTITY') or config.wandb.entity
+    wandb_project = os.environ.get('WANDB_PROJECT') or config.wandb.project
+    
+    # Login if API key available
+    if wandb_api_key:
+        try:
+            wandb.login(key=wandb_api_key, relogin=True)
+            logger.info("Wandb authentication successful")
+        except Exception as e:
+            logger.warning(f"Wandb login failed: {e}")
+    
     run_name = config.wandb.name or f"ssg-vqa-{datetime.now().strftime('%Y%m%d_%H%M')}"
     
     run = wandb.init(
-        project=config.wandb.project,
-        entity=config.wandb.entity or None,
+        project=wandb_project,
+        entity=wandb_entity or None,
         name=run_name,
         group=config.wandb.group,
         tags=config.wandb.tags,
@@ -108,6 +168,8 @@ def init_wandb(config: MIMICCXRVQAConfig) -> Optional[Any]:
         resume="allow",
         save_code=True,
     )
+    
+    logger.info(f"Wandb run started: {wandb_project}/{run_name}")
     
     # Define custom metrics
     wandb.define_metric("train/loss", summary="min")
