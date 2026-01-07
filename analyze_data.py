@@ -795,156 +795,199 @@ class DataAnalyzer:
         if not PLOTTING_AVAILABLE:
             return
         
-        # Create output directory for this file
-        viz_dir = self.output_dir / 'column_analysis' / filename.replace('.', '_')
-        viz_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Separate columns by type for visualization
-        bool_cols = [c for c in df.columns if df[c].dtype == 'bool']
-        int_cols = [c for c in df.columns if df[c].dtype in ['int64', 'int32', 'int16', 'int8']]
-        float_cols = [c for c in df.columns if df[c].dtype in ['float64', 'float32', 'float16']]
-        str_cols = [c for c in df.columns if df[c].dtype == 'object' or str(df[c].dtype).startswith('str')]
-        
-        # Limit to avoid too many plots
-        max_plots_per_type = 6
-        
-        # ===== Boolean Columns =====
-        if bool_cols:
-            n_cols = min(len(bool_cols), max_plots_per_type)
-            fig, axes = plt.subplots(1, n_cols, figsize=(4*n_cols, 4))
-            if n_cols == 1:
-                axes = [axes]
+        try:
+            # Create output directory for this file
+            viz_dir = self.output_dir / 'column_analysis' / filename.replace('.', '_')
+            viz_dir.mkdir(parents=True, exist_ok=True)
             
-            for i, col in enumerate(bool_cols[:n_cols]):
-                ax = axes[i]
-                counts = df[col].value_counts()
-                colors = ['#2ecc71', '#e74c3c']
-                ax.pie(counts.values, labels=['True', 'False'], autopct='%1.1f%%', 
-                      colors=colors[:len(counts)], startangle=90)
-                ax.set_title(col.split('.')[-1][:25], fontsize=9)
+            # Separate columns by type for visualization
+            bool_cols = [c for c in df.columns if df[c].dtype == 'bool']
+            int_cols = [c for c in df.columns if df[c].dtype in ['int64', 'int32', 'int16', 'int8']]
+            float_cols = [c for c in df.columns if df[c].dtype in ['float64', 'float32', 'float16']]
+            str_cols = [c for c in df.columns if df[c].dtype == 'object' or str(df[c].dtype).startswith('str')]
             
-            plt.suptitle(f'{filename}: Boolean Columns', fontweight='bold')
-            plt.tight_layout()
-            plt.savefig(viz_dir / 'boolean_columns.png', dpi=120, bbox_inches='tight')
-            plt.close()
+            # Limit to avoid too many plots
+            max_plots_per_type = 6
         
-        # ===== Integer Columns =====
-        if int_cols:
-            n_cols = min(len(int_cols), max_plots_per_type)
-            fig, axes = plt.subplots(2, (n_cols+1)//2, figsize=(5*((n_cols+1)//2), 8))
-            axes = axes.flatten() if n_cols > 1 else [axes]
-            
-            for i, col in enumerate(int_cols[:n_cols]):
-                ax = axes[i]
-                col_data = df[col].dropna()
-                n_unique = col_data.nunique()
+            # ===== Boolean Columns =====
+            if bool_cols:
+                n_cols = min(len(bool_cols), max_plots_per_type)
+                n_plot_cols = min(4, n_cols)
+                n_rows = (n_cols + n_plot_cols - 1) // n_plot_cols
                 
-                if n_unique <= 15:
-                    # Bar chart for low cardinality
-                    value_counts = col_data.value_counts().sort_index()
-                    colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(value_counts)))
-                    ax.bar(value_counts.index.astype(str), value_counts.values, color=colors)
-                    ax.set_xlabel('Value')
-                    ax.set_ylabel('Count')
-                    ax.tick_params(axis='x', rotation=45)
+                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(4*n_plot_cols, 4*n_rows))
+                
+                # Ensure axes is always a flat list
+                if n_rows == 1 and n_plot_cols == 1:
+                    axes_flat = [axes]
+                elif n_rows == 1 or n_plot_cols == 1:
+                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
                 else:
-                    # Histogram for high cardinality
-                    ax.hist(col_data, bins=min(50, n_unique), color='steelblue', edgecolor='white', alpha=0.8)
+                    axes_flat = axes.flatten().tolist()
+                
+                for i, col in enumerate(bool_cols[:n_cols]):
+                    ax = axes_flat[i]
+                    counts = df[col].value_counts()
+                    colors = ['#2ecc71', '#e74c3c']
+                    labels = [str(idx) for idx in counts.index]
+                    ax.pie(counts.values, labels=labels, autopct='%1.1f%%', 
+                          colors=colors[:len(counts)], startangle=90)
+                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
+                
+                # Hide empty subplots
+                for j in range(len(bool_cols[:n_cols]), len(axes_flat)):
+                    axes_flat[j].axis('off')
+                
+                plt.suptitle(f'{filename}: Boolean Columns', fontweight='bold')
+                plt.tight_layout()
+                plt.savefig(viz_dir / 'boolean_columns.png', dpi=120, bbox_inches='tight')
+                plt.close()
+            
+            # ===== Integer Columns =====
+            if int_cols:
+                n_cols = min(len(int_cols), max_plots_per_type)
+                n_rows = (n_cols + 2) // 3  # 3 columns per row
+                n_plot_cols = min(3, n_cols)
+                
+                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(5*n_plot_cols, 4*n_rows))
+                
+                # Ensure axes is always a flat list
+                if n_rows == 1 and n_plot_cols == 1:
+                    axes_flat = [axes]
+                elif n_rows == 1 or n_plot_cols == 1:
+                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
+                else:
+                    axes_flat = axes.flatten().tolist()
+                
+                for i, col in enumerate(int_cols[:n_cols]):
+                    ax = axes_flat[i]
+                    col_data = df[col].dropna()
+                    n_unique = col_data.nunique()
+                    
+                    if n_unique <= 15:
+                        # Bar chart for low cardinality
+                        value_counts = col_data.value_counts().sort_index()
+                        colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(value_counts)))
+                        ax.bar(value_counts.index.astype(str), value_counts.values, color=colors)
+                        ax.set_xlabel('Value')
+                        ax.set_ylabel('Count')
+                        ax.tick_params(axis='x', rotation=45)
+                    else:
+                        # Histogram for high cardinality
+                        ax.hist(col_data.values, bins=min(50, n_unique), color='steelblue', edgecolor='white', alpha=0.8)
+                        ax.set_xlabel('Value')
+                        ax.set_ylabel('Frequency')
+                        
+                        # Add statistics
+                        mean_val = col_data.mean()
+                        median_val = col_data.median()
+                        ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mean_val:.1f}')
+                        ax.axvline(median_val, color='orange', linestyle=':', linewidth=1.5, label=f'Median: {median_val:.1f}')
+                        ax.legend(fontsize=7)
+                    
+                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
+                    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+                
+                # Hide empty subplots
+                for j in range(len(int_cols[:n_cols]), len(axes_flat)):
+                    axes_flat[j].axis('off')
+                
+                plt.suptitle(f'{filename}: Integer Columns', fontweight='bold')
+                plt.tight_layout()
+                plt.savefig(viz_dir / 'integer_columns.png', dpi=120, bbox_inches='tight')
+                plt.close()
+            
+            # ===== Float Columns =====
+            if float_cols:
+                n_cols = min(len(float_cols), max_plots_per_type)
+                n_rows = (n_cols + 2) // 3  # 3 columns per row
+                n_plot_cols = min(3, n_cols)
+                
+                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(5*n_plot_cols, 4*n_rows))
+                
+                # Ensure axes is always a flat list
+                if n_rows == 1 and n_plot_cols == 1:
+                    axes_flat = [axes]
+                elif n_rows == 1 or n_plot_cols == 1:
+                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
+                else:
+                    axes_flat = axes.flatten().tolist()
+                
+                for i, col in enumerate(float_cols[:n_cols]):
+                    ax = axes_flat[i]
+                    col_data = df[col].dropna()
+                    
+                    # Histogram with KDE-like appearance
+                    ax.hist(col_data.values, bins=50, color='teal', edgecolor='white', alpha=0.7)
+                    
+                    # Add statistics box
+                    stats_text = f"Mean: {col_data.mean():.3f}\nStd: {col_data.std():.3f}\nMin: {col_data.min():.3f}\nMax: {col_data.max():.3f}"
+                    ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, fontsize=7,
+                           verticalalignment='top', horizontalalignment='right',
+                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                    
                     ax.set_xlabel('Value')
                     ax.set_ylabel('Frequency')
+                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
+                    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+                
+                # Hide empty subplots
+                for j in range(len(float_cols[:n_cols]), len(axes_flat)):
+                    axes_flat[j].axis('off')
+                
+                plt.suptitle(f'{filename}: Float Columns', fontweight='bold')
+                plt.tight_layout()
+                plt.savefig(viz_dir / 'float_columns.png', dpi=120, bbox_inches='tight')
+                plt.close()
+            
+            # ===== String/Categorical Columns =====
+            # Only visualize low-to-medium cardinality string columns
+            str_cols_viz = [c for c in str_cols if df[c].nunique() <= 30]
+            
+            if str_cols_viz:
+                n_cols = min(len(str_cols_viz), max_plots_per_type)
+                
+                fig, axes = plt.subplots(n_cols, 1, figsize=(12, max(4, 3*n_cols)))
+                
+                # Ensure axes is always a list
+                if n_cols == 1:
+                    axes_flat = [axes]
+                else:
+                    axes_flat = list(axes)
+                
+                for i, col in enumerate(str_cols_viz[:n_cols]):
+                    ax = axes_flat[i]
+                    value_counts = df[col].value_counts().head(15)
                     
-                    # Add statistics
-                    mean_val = col_data.mean()
-                    median_val = col_data.median()
-                    ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mean_val:.1f}')
-                    ax.axvline(median_val, color='orange', linestyle=':', linewidth=1.5, label=f'Median: {median_val:.1f}')
-                    ax.legend(fontsize=7)
+                    # Truncate long labels
+                    labels = [str(v)[:30] + ('...' if len(str(v)) > 30 else '') for v in value_counts.index]
+                    colors = plt.cm.Paired(np.linspace(0, 1, len(value_counts)))
+                    
+                    bars = ax.barh(labels, value_counts.values, color=colors)
+                    ax.set_xlabel('Count')
+                    ax.set_title(f'{col} ({df[col].nunique()} unique values)', fontsize=10, fontweight='bold')
+                    ax.invert_yaxis()
+                    ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+                    
+                    # Add percentage labels
+                    total = len(df)
+                    for bar, count in zip(bars, value_counts.values):
+                        pct = count / total * 100
+                        ax.text(bar.get_width() + total*0.01, bar.get_y() + bar.get_height()/2,
+                               f'{pct:.1f}%', va='center', fontsize=8)
                 
-                ax.set_title(col.split('.')[-1][:25], fontsize=9)
-                ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+                plt.suptitle(f'{filename}: Categorical Columns', fontweight='bold', y=1.01)
+                plt.tight_layout()
+                plt.savefig(viz_dir / 'categorical_columns.png', dpi=120, bbox_inches='tight')
+                plt.close()
             
-            # Hide empty subplots
-            for j in range(i+1, len(axes)):
-                axes[j].axis('off')
+            # ===== Summary Overview =====
+            self._create_column_summary_plot(filename, df, viz_dir)
             
-            plt.suptitle(f'{filename}: Integer Columns', fontweight='bold')
-            plt.tight_layout()
-            plt.savefig(viz_dir / 'integer_columns.png', dpi=120, bbox_inches='tight')
-            plt.close()
-        
-        # ===== Float Columns =====
-        if float_cols:
-            n_cols = min(len(float_cols), max_plots_per_type)
-            fig, axes = plt.subplots(2, (n_cols+1)//2, figsize=(5*((n_cols+1)//2), 8))
-            axes = axes.flatten() if n_cols > 1 else [axes]
+            logger.info(f"  [VIZ] Column analysis plots saved to: {viz_dir}")
             
-            for i, col in enumerate(float_cols[:n_cols]):
-                ax = axes[i]
-                col_data = df[col].dropna()
-                
-                # Histogram with KDE-like appearance
-                ax.hist(col_data, bins=50, color='teal', edgecolor='white', alpha=0.7)
-                
-                # Add statistics box
-                stats_text = f"Mean: {col_data.mean():.3f}\nStd: {col_data.std():.3f}\nMin: {col_data.min():.3f}\nMax: {col_data.max():.3f}"
-                ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, fontsize=7,
-                       verticalalignment='top', horizontalalignment='right',
-                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-                
-                ax.set_xlabel('Value')
-                ax.set_ylabel('Frequency')
-                ax.set_title(col.split('.')[-1][:25], fontsize=9)
-                ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-            
-            # Hide empty subplots
-            for j in range(i+1, len(axes)):
-                axes[j].axis('off')
-            
-            plt.suptitle(f'{filename}: Float Columns', fontweight='bold')
-            plt.tight_layout()
-            plt.savefig(viz_dir / 'float_columns.png', dpi=120, bbox_inches='tight')
-            plt.close()
-        
-        # ===== String/Categorical Columns =====
-        # Only visualize low-to-medium cardinality string columns
-        str_cols_viz = [c for c in str_cols if df[c].nunique() <= 30]
-        
-        if str_cols_viz:
-            n_cols = min(len(str_cols_viz), max_plots_per_type)
-            fig, axes = plt.subplots(n_cols, 1, figsize=(12, 4*n_cols))
-            if n_cols == 1:
-                axes = [axes]
-            
-            for i, col in enumerate(str_cols_viz[:n_cols]):
-                ax = axes[i]
-                value_counts = df[col].value_counts().head(15)
-                
-                # Truncate long labels
-                labels = [str(v)[:30] + ('...' if len(str(v)) > 30 else '') for v in value_counts.index]
-                colors = plt.cm.Paired(np.linspace(0, 1, len(value_counts)))
-                
-                bars = ax.barh(labels, value_counts.values, color=colors)
-                ax.set_xlabel('Count')
-                ax.set_title(f'{col} ({df[col].nunique()} unique values)', fontsize=10, fontweight='bold')
-                ax.invert_yaxis()
-                ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-                
-                # Add percentage labels
-                total = len(df)
-                for bar, count in zip(bars, value_counts.values):
-                    pct = count / total * 100
-                    ax.text(bar.get_width() + total*0.01, bar.get_y() + bar.get_height()/2,
-                           f'{pct:.1f}%', va='center', fontsize=8)
-            
-            plt.suptitle(f'{filename}: Categorical Columns', fontweight='bold', y=1.01)
-            plt.tight_layout()
-            plt.savefig(viz_dir / 'categorical_columns.png', dpi=120, bbox_inches='tight')
-            plt.close()
-        
-        # ===== Summary Overview =====
-        self._create_column_summary_plot(filename, df, viz_dir)
-        
-        logger.info(f"  [VIZ] Column analysis plots saved to: {viz_dir}")
+        except Exception as e:
+            logger.warning(f"  [VIZ] Error generating column visualizations for {filename}: {e}")
     
     def _create_column_summary_plot(self, filename: str, df: pd.DataFrame, viz_dir: Path):
         """Create a summary overview of all columns in the file."""
