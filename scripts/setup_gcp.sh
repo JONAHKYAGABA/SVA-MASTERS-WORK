@@ -71,6 +71,7 @@ log_step() {
 # =============================================================================
 CONFIGURE_SECRETS=false
 SKIP_CONDA=false
+SKIP_DRIVERS=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -82,12 +83,17 @@ while [[ $# -gt 0 ]]; do
             SKIP_CONDA=true
             shift
             ;;
+        --skip-drivers)
+            SKIP_DRIVERS=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: ./setup_gcp.sh [OPTIONS]"
             echo ""
             echo "Options:"
             echo "  --configure-secrets   Only configure HuggingFace and Wandb secrets"
             echo "  --skip-conda          Skip conda installation (if already installed)"
+            echo "  --skip-drivers        Skip NVIDIA driver installation (if already installed)"
             echo "  --help, -h            Show this help message"
             exit 0
             ;;
@@ -225,7 +231,13 @@ log_info "Environment created and activated"
 # =============================================================================
 log_step "[4/8] Checking NVIDIA/CUDA Setup"
 
-if command -v nvidia-smi &> /dev/null; then
+if [ "$SKIP_DRIVERS" = true ]; then
+    log_info "Skipping driver installation (--skip-drivers)"
+    if command -v nvidia-smi &> /dev/null; then
+        log_info "NVIDIA driver detected:"
+        nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
+    fi
+elif command -v nvidia-smi &> /dev/null; then
     log_info "NVIDIA driver detected:"
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
 else
