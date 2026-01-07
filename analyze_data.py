@@ -27,6 +27,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 import warnings
+import random
 
 import numpy as np
 import pandas as pd
@@ -38,6 +39,12 @@ try:
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
+
+try:
+    from PIL import Image, ImageDraw
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
 
 # Setup logging
 logging.basicConfig(
@@ -117,13 +124,23 @@ class DataAnalyzer:
         mimic_cxr_path: str,
         mimic_qa_path: str,
         chexpert_path: Optional[str] = None,
-        output_dir: str = './analysis_output'
+        output_dir: str = './analysis_output',
+        num_workers: Optional[int] = None,
+        prefetch_factor: int = 2,
+        visualize_samples: int = 10,
     ):
         self.mimic_cxr_path = Path(mimic_cxr_path)
         self.mimic_qa_path = Path(mimic_qa_path)
         self.chexpert_path = Path(chexpert_path) if chexpert_path else None
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Default to half the CPUs (at least 8) to utilize the machine
+        if num_workers is None:
+            cpu_count = os.cpu_count() or 8
+            num_workers = max(8, cpu_count // 2)
+        self.num_workers = max(1, num_workers)
+        self.prefetch_factor = max(1, prefetch_factor)
+        self.visualize_samples = max(0, visualize_samples)
         
         self.report = DataAnalysisReport()
         
@@ -132,6 +149,7 @@ class DataAnalyzer:
         logger.info("=" * 60)
         logger.info("MIMIC-CXR VQA Data Analysis")
         logger.info("=" * 60)
+        logger.info(f"Using num_workers={self.num_workers}, prefetch_factor={self.prefetch_factor}")
         
         # Step 1: Validate paths
         logger.info("\n[1/7] Validating dataset paths...")
@@ -162,6 +180,11 @@ class DataAnalyzer:
         # Step 7: Generate report
         logger.info("\n[7/7] Generating report...")
         self._generate_report()
+
+        # Optional: Visualize a few samples (images + scene graphs)
+        if self.visualize_samples > 0:
+            logger.info(f"\n[Optional] Visualizing {self.visualize_samples} sample studies...")
+            self._visualize_samples(self.visualize_samples)
         
         return self.report
     
@@ -328,53 +351,68 @@ class DataAnalyzer:
         qa_files = list(qa_dir.rglob('*.qa.json'))[:10000]  # Sample for speed
         
         logger.info(f"  Sampling {len(qa_files)} QA files...")
-        
-        for qa_file in qa_files:
+        def process_qa_file(qa_file):
+            nonlocal total_qa
             try:
                 with open(qa_file) as f:
                     qa_data = json.load(f)
                 
                 questions = qa_data.get('questions', [])
-                total_qa += len(questions)
+                total_local = len(questions)
+                local_qt = Counter()
+                local_at = Counter()
+                local_pol = Counter()
+                local_regions = Counter()
                 
                 for q in questions:
                     # Question type
                     q_type = q.get('question_type', 'unknown')
-                    question_types[q_type] += 1
+                    local_qt[q_type] += 1
                     
                     # Categorize question type
                     q_type_lower = q_type.lower()
                     if any(t in q_type_lower for t in ['is_', 'has_', 'yes', 'no']):
-                        answer_types['binary'] += 1
+                        local_at['binary'] += 1
                     elif any(t in q_type_lower for t in ['where', 'locate', 'position']):
-                        answer_types['region'] += 1
+                        local_at['region'] += 1
                     elif any(t in q_type_lower for t in ['severe', 'grade']):
-                        answer_types['severity'] += 1
+                        local_at['severity'] += 1
                     else:
-                        answer_types['category'] += 1
+                        local_at['category'] += 1
                     
                     # Polarity (positive/negative findings)
                     answers = q.get('answers', [])
                     if answers:
                         answer_text = answers[0].get('text', '').lower()
                         if 'yes' in answer_text or 'present' in answer_text or 'positive' in answer_text:
-                            polarity['positive'] += 1
+                            local_pol['positive'] += 1
                         elif 'no' in answer_text or 'absent' in answer_text or 'negative' in answer_text:
-                            polarity['negative'] += 1
+                            local_pol['negative'] += 1
                         else:
-                            polarity['neutral'] += 1
+                            local_pol['neutral'] += 1
                     
                     # Anatomical regions
                     question_text = q.get('question', '').lower()
                     for region_cat, keywords in self.ANATOMICAL_REGIONS.items():
                         if any(kw in question_text for kw in keywords):
-                            regions[region_cat] += 1
+                            local_regions[region_cat] += 1
                             break
                     else:
-                        regions['other'] += 1
-                        
-            except Exception as e:
-                continue
+                        local_regions['other'] += 1
+                
+                return total_local, local_qt, local_at, local_pol, local_regions
+            except Exception:
+                return 0, Counter(), Counter(), Counter(), Counter()
+        
+        # Parallelize over QA files
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.num_workers) as ex:
+            for total_local, l_qt, l_at, l_pol, l_regions in ex.map(process_qa_file, qa_files):
+                total_qa += total_local
+                question_types.update(l_qt)
+                answer_types.update(l_at)
+                polarity.update(l_pol)
+                regions.update(l_regions)
         
         # Scale up estimates based on sampling
         scale_factor = len(list(qa_dir.rglob('*.qa.json'))) / max(len(qa_files), 1)
@@ -422,27 +460,38 @@ class DataAnalyzer:
         total_regions = 0
         total_bboxes = 0
         graphs_analyzed = 0
-        
-        for sg_file in sg_files:
+
+        def process_sg_file(sg_file):
             try:
                 with open(sg_file) as f:
                     sg = json.load(f)
                 
                 observations = sg.get('observations', {})
                 num_obs = len(observations)
-                total_observations += num_obs
                 
-                for obs_id, obs in observations.items():
+                local_regions = 0
+                local_bboxes = 0
+                
+                for _, obs in observations.items():
                     regions = obs.get('regions', [])
-                    total_regions += len(regions)
+                    local_regions += len(regions)
                     
                     if 'localization' in obs and obs['localization']:
-                        total_bboxes += 1
+                        local_bboxes += 1
                 
+                return num_obs, local_regions, local_bboxes
+            except Exception:
+                return 0, 0, 0
+        
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=self.num_workers) as ex:
+            for num_obs, local_regions, local_bboxes in ex.map(process_sg_file, sg_files):
+                if num_obs == 0 and local_regions == 0:
+                    continue
                 graphs_analyzed += 1
-                
-            except Exception as e:
-                continue
+                total_observations += num_obs
+                total_regions += local_regions
+                total_bboxes += local_bboxes
         
         if graphs_analyzed > 0:
             self.report.total_scene_graphs = int(len(list(sg_dir.rglob('*.json'))))
@@ -569,6 +618,10 @@ class DataAnalyzer:
         # Generate plots if available
         if PLOTTING_AVAILABLE:
             self._generate_plots()
+        
+        # Optional: visualizations for sanity check
+        if PLOTTING_AVAILABLE and PIL_AVAILABLE and self.visualize_samples > 0:
+            self._visualize_samples(self.visualize_samples)
     
     def _save_report(self):
         """Save analysis report to JSON."""
@@ -659,6 +712,96 @@ class DataAnalyzer:
         
         logger.info(f"📊 Plots saved to: {plot_path}")
 
+    def _get_image_path(self, subject_id: str, study_id: str) -> Optional[Path]:
+        """Locate an image path for a given subject/study."""
+        files_dir = self.mimic_cxr_path / 'files'
+        if not files_dir.exists():
+            return None
+        subj_dir = files_dir / subject_id[:3] / subject_id / study_id
+        if subj_dir.exists():
+            imgs = sorted(subj_dir.glob('*.jpg'))
+            if imgs:
+                return imgs[0]
+        return None
+
+    def _get_scene_graph_path(self, subject_id: str, study_id: str) -> Optional[Path]:
+        """Locate scene graph json."""
+        candidates = [
+            self.mimic_qa_path / 'scene_data' / subject_id[:3] / subject_id / f"{study_id}.scene_graph.json",
+            self.mimic_qa_path / 'scene_graphs' / subject_id[:3] / subject_id / f"{study_id}.scene_graph.json",
+        ]
+        for c in candidates:
+            if c.exists():
+                return c
+        return None
+
+    def _visualize_samples(self, num_samples: int = 10):
+        """Visualize images + scene graphs for a few samples."""
+        qa_dir = self.mimic_qa_path / 'qa'
+        if not qa_dir.exists():
+            logger.warning("QA directory missing; skipping visualization.")
+            return
+
+        qa_files = list(qa_dir.rglob('*.qa.json'))
+        if not qa_files:
+            logger.warning("No QA files found for visualization.")
+            return
+
+        sample_files = random.sample(qa_files, min(num_samples, len(qa_files)))
+        viz_dir = self.output_dir / 'visualizations'
+        viz_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx, qa_file in enumerate(sample_files, 1):
+            try:
+                with open(qa_file) as f:
+                    qa_data = json.load(f)
+                patient_id = qa_data.get('patient_id') or qa_file.parts[-3]
+                study_id = qa_data.get('study_id') or qa_file.stem.split('.')[0]
+
+                img_path = self._get_image_path(patient_id, study_id)
+                if img_path is None or not img_path.exists():
+                    logger.debug(f"No image found for {patient_id}/{study_id}")
+                    continue
+
+                image = Image.open(img_path).convert('RGB')
+
+                # Try to load scene graph for bboxes
+                sg_path = self._get_scene_graph_path(patient_id, study_id)
+                bboxes = []
+                if sg_path and sg_path.exists():
+                    with open(sg_path) as f:
+                        sg = json.load(f)
+                    observations = sg.get('observations', {})
+                    # take first observation with localization
+                    for obs in observations.values():
+                        locs = obs.get('localization', {})
+                        if locs:
+                            first_loc = next(iter(locs.values()))
+                            bboxes = first_loc.get('bboxes', []) or []
+                            break
+
+                # Plot
+                fig, ax = plt.subplots(figsize=(8, 8))
+                ax.imshow(image)
+                for bb in bboxes:
+                    if len(bb) == 4:
+                        x1, y1, x2, y2 = bb
+                        rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                             linewidth=2, edgecolor='lime', facecolor='none')
+                        ax.add_patch(rect)
+                q_sample = ""
+                if qa_data.get('questions'):
+                    q_sample = qa_data['questions'][0].get('question', '')
+                ax.set_title(f"{patient_id}/{study_id}\n{q_sample[:80]}")
+                ax.axis('off')
+                out_path = viz_dir / f"sample_{idx}_{patient_id}_{study_id}.png"
+                plt.tight_layout()
+                plt.savefig(out_path, dpi=150)
+                plt.close(fig)
+                logger.info(f"Saved visualization: {out_path}")
+            except Exception as e:
+                logger.warning(f"Visualization failed for {qa_file}: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze MIMIC-CXR VQA Data')
@@ -673,6 +816,12 @@ def main():
                        help='Directory to save analysis results')
     parser.add_argument('--config', type=str, default=None,
                        help='Path to config file (alternative to individual paths)')
+    parser.add_argument('--num_workers', type=int, default=None,
+                       help='Number of worker threads for analysis (default: half of CPUs, min 8)')
+    parser.add_argument('--prefetch_factor', type=int, default=2,
+                       help='Prefetch factor for parallel loading')
+    parser.add_argument('--visualize_samples', type=int, default=10,
+                       help='Number of samples to visualize (images + scene graphs)')
     
     args = parser.parse_args()
     
@@ -694,7 +843,10 @@ def main():
         mimic_cxr_path=args.mimic_cxr_path,
         mimic_qa_path=args.mimic_qa_path,
         chexpert_path=args.chexpert_path,
-        output_dir=args.output_dir
+        output_dir=args.output_dir,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        visualize_samples=args.visualize_samples
     )
     
     report = analyzer.run_full_analysis()
