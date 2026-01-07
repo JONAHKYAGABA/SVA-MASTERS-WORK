@@ -439,21 +439,73 @@ def verify_loss_computation(outputs, batch, config, device):
         return None, None, issues
 
 
-def verify_backward_pass(model, loss, device):
+def verify_backward_pass(model, batch, config, device):
     """Verify backward pass and gradients."""
     logger.info("\n" + "=" * 60)
     logger.info("STEP 7: Verifying backward pass...")
     logger.info("=" * 60)
     
+    from training.loss import MultiTaskLoss
+    
     issues = []
     
     try:
+        # Set model to train mode and enable gradients
         model.train()
-        
-        # Zero gradients
         model.zero_grad()
         
-        # Backward
+        # Re-run forward pass WITH gradients
+        images = batch['images'].to(device)
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        token_type_ids = batch.get('token_type_ids', torch.zeros_like(input_ids)).to(device)
+        scene_graphs = batch['scene_graphs']
+        question_types = batch['question_types']
+        image_widths = batch.get('image_widths', torch.full((images.shape[0],), 224, dtype=torch.long)).to(device)
+        image_heights = batch.get('image_heights', torch.full((images.shape[0],), 224, dtype=torch.long)).to(device)
+        
+        # Forward pass WITH gradients
+        outputs = model(
+            images=images,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            scene_graphs=scene_graphs,
+            question_types=question_types,
+            image_widths=image_widths,
+            image_heights=image_heights
+        )
+        
+        # Compute loss
+        criterion = MultiTaskLoss(
+            vqa_weight=config.training.vqa_loss_weight,
+            chexpert_weight=config.training.chexpert_loss_weight,
+            binary_weight=config.training.binary_head_weight,
+            category_weight=config.training.category_head_weight,
+            region_weight=config.training.region_head_weight,
+            severity_weight=config.training.severity_head_weight,
+        )
+        
+        answer_idx = batch['answer_idx'].to(device)
+        chexpert_labels = batch['chexpert_labels'].to(device)
+        chexpert_mask = batch['chexpert_mask'].to(device)
+        
+        vqa_targets = {
+            'binary': answer_idx,
+            'category': answer_idx,
+            'region': answer_idx,
+            'severity': answer_idx,
+        }
+        
+        loss, _ = criterion(
+            outputs,
+            vqa_targets,
+            chexpert_labels,
+            chexpert_mask,
+            question_types
+        )
+        
+        # Backward pass
         loss.backward()
         
         # Check gradients
@@ -562,8 +614,8 @@ def main():
         logger.error("\nLoss computation failed. Cannot continue.")
         return 1
     
-    # Step 7: Verify backward
-    issues = verify_backward_pass(model, loss, device)
+    # Step 7: Verify backward (re-runs forward with gradients enabled)
+    issues = verify_backward_pass(model, batch, config, device)
     all_issues.extend(issues)
     
     # Final summary
