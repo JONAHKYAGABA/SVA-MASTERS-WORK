@@ -531,10 +531,14 @@ class MIMICCXRVQADataset(Dataset):
         
         # Iterate through patient directories
         # Structure: qa/p{XX}/p{subject_id}/s{study_id}.qa.json
-        p_groups = [p for p in qa_dir.iterdir() if p.is_dir() and p.name.startswith('p')]
+        p_groups = sorted([p for p in qa_dir.iterdir() if p.is_dir() and p.name.startswith('p')])
         logger.info(f"Scanning {len(p_groups)} patient groups for QA files...")
         
         files_scanned = 0
+        skipped_split = 0
+        skipped_image = 0
+        skipped_quality = 0
+        
         for p_group in p_groups:
             for patient_dir in p_group.iterdir():
                 if not patient_dir.is_dir() or not patient_dir.name.startswith('p'):
@@ -542,8 +546,8 @@ class MIMICCXRVQADataset(Dataset):
                 
                 for qa_file in patient_dir.glob('s*.qa.json'):
                     files_scanned += 1
-                    if files_scanned % 10000 == 0:
-                        logger.info(f"  Scanned {files_scanned} files, found {len(samples)} samples...")
+                    if files_scanned % 5000 == 0:
+                        logger.info(f"  [{files_scanned}] samples={len(samples)}, skip_split={skipped_split}, skip_img={skipped_image}, skip_qual={skipped_quality}")
                     try:
                         # Parse IDs from path
                         # patient_dir.name = "p10000032" -> subject_id = 10000032
@@ -554,6 +558,7 @@ class MIMICCXRVQADataset(Dataset):
                         
                         # Check if in valid split
                         if valid_studies and (subject_id, study_id) not in valid_studies:
+                            skipped_split += 1
                             continue
                         
                         # Load QA data
@@ -563,6 +568,7 @@ class MIMICCXRVQADataset(Dataset):
                         # Find corresponding image
                         image_path, dicom_id = self._find_image(subject_id, study_id)
                         if image_path is None:
+                            skipped_image += 1
                             continue
                         
                         # Find scene graph
@@ -578,6 +584,7 @@ class MIMICCXRVQADataset(Dataset):
                             # Quality grade comparison (A++ > A+ > A > B)
                             if self.quality_grade:
                                 if not self._meets_quality_grade(quality_rating, self.quality_grade):
+                                    skipped_quality += 1
                                     continue
                             
                             # Question type filter
@@ -606,6 +613,9 @@ class MIMICCXRVQADataset(Dataset):
                     except Exception as e:
                         logger.debug(f"Error loading {qa_file}: {e}")
                         continue
+        
+        logger.info(f"Scan complete: {files_scanned} files, {len(samples)} samples")
+        logger.info(f"  Skipped: split={skipped_split}, image={skipped_image}, quality={skipped_quality}")
         
         if len(samples) == 0:
             logger.warning("No samples found, creating dummy samples")
