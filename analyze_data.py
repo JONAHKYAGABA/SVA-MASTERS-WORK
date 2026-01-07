@@ -3684,17 +3684,13 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
 
     def _visualize_scene_graphs(self, num_samples: int = 5):
         """
-        Create PROPER network graph visualizations using networkx that match
-        the pipeline.png reference style.
+        Create well-organized scene graph visualizations with ALL nodes.
         
-        Uses CORRECT MIMIC-Ext-CXR-QBA field names:
-        - observations: contains "regions" (list of {"region": "..."}), "obs_entities", etc.
-        - located_at_relations: explicit observation->region relations
-        - obs_relations: parent-child observation relations  
-        - obs_sent_relations: observation->sentence relations
-        - region_region_relations: anatomical region hierarchy
-        
-        Creates a DIRECTED graph with labeled edges like the SSG-VQA pipeline diagram.
+        Key design principles:
+        - ALL observations, regions, and entities included
+        - Hierarchical layout: observations in center, regions on left, entities on right
+        - Light-colored nodes with DARK text for readability
+        - Clear curved edges with relation labels
         """
         if not PLOTTING_AVAILABLE:
             logger.warning("Matplotlib not available, skipping scene graph visualization")
@@ -3704,7 +3700,7 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
             logger.warning("networkx not available, skipping network graph visualization")
             return
         
-        logger.info(f"  Creating PIPELINE-STYLE scene graph visualizations...")
+        logger.info(f"  Creating organized scene graph visualizations with ALL nodes...")
         
         scene_data_dir = self.mimic_qa_path / 'scene_data'
         if not scene_data_dir.exists():
@@ -3734,319 +3730,253 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
                 study_id = sg.get('study_id', sg_file.stem.split('.')[0])
                 
                 observations = sg.get('observations', {})
-                regions_dict = sg.get('regions', {})
-                sentences = sg.get('sentences', {})
-                
-                # Get explicit relations from the scene graph
-                located_at_rels = sg.get('located_at_relations', [])
-                obs_relations = sg.get('obs_relations', [])
-                obs_sent_rels = sg.get('obs_sent_relations', [])
-                region_region_rels = sg.get('region_region_relations', [])
                 
                 if not observations or len(observations) < 2:
                     continue
                 
-                # Create DIRECTED graph (like pipeline.png)
+                # ================================================================
+                # BUILD COMPLETE GRAPH with ALL nodes
+                # ================================================================
                 G = nx.DiGraph()
                 
-                # Define color scheme (matching pipeline.png style)
-                COLOR_OBS_POS = '#e74c3c'      # Red for positive findings
-                COLOR_OBS_NEG = '#27ae60'      # Green for negative findings
-                COLOR_OBS_UNK = '#f39c12'      # Orange for uncertain
-                COLOR_REGION = '#5dade2'       # Light blue for regions (like pipeline)
-                COLOR_ENTITY = '#af7ac5'       # Light purple for entities
-                COLOR_SENTENCE = '#48c9b0'     # Teal for sentences
+                # Light pastel colors with DARK text for readability
+                NODE_STYLES = {
+                    'obs_pos': {'fill': '#ffcccc', 'edge': '#cc0000', 'text': '#8b0000'},   # Light red, dark red text
+                    'obs_neg': {'fill': '#ccffcc', 'edge': '#00cc00', 'text': '#006400'},   # Light green, dark green text
+                    'obs_unk': {'fill': '#fff3cd', 'edge': '#ffc107', 'text': '#856404'},   # Light yellow, dark text
+                    'region':  {'fill': '#cce5ff', 'edge': '#0066cc', 'text': '#004085'},   # Light blue, dark blue text
+                    'entity':  {'fill': '#e2d5f1', 'edge': '#6f42c1', 'text': '#4a235a'},   # Light purple, dark purple text
+                }
                 
-                # Edge colors for different relation types
-                EDGE_LOCATED = '#3498db'
-                EDGE_HAS_ENTITY = '#9b59b6'
-                EDGE_CHILD = '#e67e22'
-                EDGE_REGION_REL = '#7f8c8d'
+                obs_list = list(observations.items())
+                added_regions = {}  # region_name -> node_id
+                added_entities = {} # entity_name -> node_id
                 
-                # Limit observations to prevent overcrowding
-                obs_list = list(observations.items())[:10]
-                obs_ids_in_graph = set()
-                
-                # ===== Add observation nodes =====
+                # Add ALL observation nodes (NO LIMITS)
                 for obs_id, obs in obs_list:
                     obs_name = obs.get('name', 'unknown')
-                    short_name = obs_name[:22] if len(obs_name) <= 22 else obs_name[:20] + '..'
+                    # Keep full name, only truncate if extremely long
+                    if len(obs_name) > 30:
+                        obs_name = obs_name[:28] + '..'
                     
                     polarity = obs.get('positiveness', 'unknown')
                     if polarity == 'pos':
-                        color = COLOR_OBS_POS
+                        style = NODE_STYLES['obs_pos']
                     elif polarity == 'neg':
-                        color = COLOR_OBS_NEG
+                        style = NODE_STYLES['obs_neg']
                     else:
-                        color = COLOR_OBS_UNK
+                        style = NODE_STYLES['obs_unk']
                     
                     G.add_node(obs_id, 
+                              label=obs_name, 
                               node_type='observation',
-                              label=short_name,
-                              color=color,
-                              size=2200,
-                              polarity=polarity)
-                    obs_ids_in_graph.add(obs_id)
+                              polarity=polarity,
+                              **style)
                     
-                    # Extract regions from observation's "regions" field
-                    # CORRECT field name: "regions" contains [{"region": "lungs", "distances": []}]
-                    obs_regions_list = obs.get('regions', [])
-                    for reg_info in obs_regions_list[:2]:
+                    # Add ALL regions for this observation (NO LIMITS)
+                    regions_list = obs.get('regions', [])
+                    for reg_info in regions_list:
                         if isinstance(reg_info, dict):
                             region_name = reg_info.get('region', '')
                         else:
                             region_name = str(reg_info)
                         
                         if region_name:
-                            region_node = f"R:{region_name}"
-                            if not G.has_node(region_node):
-                                G.add_node(region_node,
+                            if region_name not in added_regions:
+                                region_node = f"R:{region_name}"
+                                # Keep full region name, truncate only if very long
+                                short_name = region_name[:25] if len(region_name) > 25 else region_name
+                                G.add_node(region_node, 
+                                          label=short_name,
                                           node_type='region',
-                                          label=region_name[:15],
-                                          color=COLOR_REGION,
-                                          size=1400)
-                            G.add_edge(obs_id, region_node, 
-                                      relation='located_in',
-                                      color=EDGE_LOCATED)
+                                          **NODE_STYLES['region'])
+                                added_regions[region_name] = region_node
+                            
+                            G.add_edge(obs_id, added_regions[region_name], relation='located_in')
                     
-                    # Add entity connections from "obs_entities" field (correct name)
-                    obs_entities = obs.get('obs_entities', [])
-                    for entity in obs_entities[:2]:
-                        entity_node = f"E:{entity}"
-                        if not G.has_node(entity_node):
-                            G.add_node(entity_node,
-                                      node_type='entity', 
-                                      label=entity[:15],
-                                      color=COLOR_ENTITY,
-                                      size=1200)
-                        G.add_edge(obs_id, entity_node,
-                                  relation='finding',
-                                  color=EDGE_HAS_ENTITY)
-                
-                # ===== Add explicit relations from scene graph =====
-                # Add observation-observation relations (parent-child)
-                for rel in obs_relations[:15]:
-                    parent_id = rel.get('parent_observation_id', '')
-                    child_id = rel.get('child_observation_id', '')
-                    child_type = rel.get('child_type', 'related')
-                    
-                    if parent_id in obs_ids_in_graph and child_id in obs_ids_in_graph:
-                        G.add_edge(parent_id, child_id,
-                                  relation=child_type[:12],
-                                  color=EDGE_CHILD)
-                
-                # Add region-region relations
-                for rel in region_region_rels[:10]:
-                    region1 = f"R:{rel.get('region', '')}"
-                    region2 = f"R:{rel.get('related_region', '')}"
-                    rel_type = rel.get('relation_type', 'related')
-                    
-                    if G.has_node(region1) and G.has_node(region2):
-                        G.add_edge(region1, region2,
-                                  relation=rel_type[:10],
-                                  color=EDGE_REGION_REL)
+                    # Add ALL entities for this observation (NO LIMITS)
+                    entities_list = obs.get('obs_entities', [])
+                    for entity in entities_list:
+                        if entity:
+                            if entity not in added_entities:
+                                entity_node = f"E:{entity}"
+                                # Keep full entity name, truncate only if very long
+                                short_name = entity[:25] if len(entity) > 25 else entity
+                                G.add_node(entity_node,
+                                          label=short_name,
+                                          node_type='entity',
+                                          **NODE_STYLES['entity'])
+                                added_entities[entity] = entity_node
+                            
+                            G.add_edge(obs_id, added_entities[entity], relation='finding')
                 
                 if len(G.nodes()) < 3:
                     continue
                 
-                # ===== Create figure with pipeline-style layout =====
-                fig = plt.figure(figsize=(22, 16))
-                gs = gridspec.GridSpec(2, 3, figure=fig, 
-                                      width_ratios=[2.8, 1, 0.8], 
-                                      height_ratios=[2.5, 1])
+                # ================================================================
+                # CREATE HIERARCHICAL LAYOUT
+                # Regions on LEFT, Observations in CENTER, Entities on RIGHT
+                # ================================================================
                 
-                # Panel 1: Main Network Graph (pipeline style)
-                ax1 = fig.add_subplot(gs[:, 0])
+                obs_nodes = [n for n in G.nodes() if G.nodes[n].get('node_type') == 'observation']
+                region_nodes = [n for n in G.nodes() if n.startswith('R:')]
+                entity_nodes = [n for n in G.nodes() if n.startswith('E:')]
                 
-                # Use hierarchical layout for better visualization
-                try:
-                    # Try shell layout - puts different node types in concentric circles
-                    obs_nodes = [n for n in G.nodes() if not n.startswith(('R:', 'E:', 'S:'))]
-                    region_nodes = [n for n in G.nodes() if n.startswith('R:')]
-                    entity_nodes = [n for n in G.nodes() if n.startswith('E:')]
+                n_obs = len(obs_nodes)
+                n_reg = len(region_nodes)
+                n_ent = len(entity_nodes)
+                
+                # Calculate vertical spacing based on max column height
+                max_col = max(n_obs, n_reg, n_ent, 1)
+                v_spacing = 0.35  # Vertical space between nodes
+                total_height = max_col * v_spacing
+                
+                pos = {}
+                
+                # Layout observations in center column (evenly spaced)
+                start_y = total_height / 2
+                for i, node in enumerate(obs_nodes):
+                    y = start_y - (i * v_spacing)
+                    pos[node] = (0.0, y)
+                
+                # Layout regions on LEFT (evenly spaced)
+                reg_start_y = (n_reg - 1) * v_spacing / 2
+                for i, node in enumerate(region_nodes):
+                    y = reg_start_y - (i * v_spacing)
+                    pos[node] = (-2.0, y)
+                
+                # Layout entities on RIGHT (evenly spaced)
+                ent_start_y = (n_ent - 1) * v_spacing / 2
+                for i, node in enumerate(entity_nodes):
+                    y = ent_start_y - (i * v_spacing)
+                    pos[node] = (2.0, y)
+                
+                # ================================================================
+                # DRAW THE GRAPH - Dynamic sizing based on content
+                # ================================================================
+                fig_width = max(18, 14 + max(n_reg, n_ent) * 0.1)
+                fig_height = max(10, 6 + max_col * 0.4)
+                fig, ax = plt.subplots(1, 1, figsize=(fig_width, fig_height))
+                
+                # Draw edges FIRST (behind nodes)
+                for (u, v, data) in G.edges(data=True):
+                    x1, y1 = pos[u]
+                    x2, y2 = pos[v]
                     
-                    shells = [obs_nodes]
-                    if region_nodes:
-                        shells.append(region_nodes)
-                    if entity_nodes:
-                        shells.append(entity_nodes)
-                    
-                    if len(shells) > 1 and all(len(s) > 0 for s in shells):
-                        pos = nx.shell_layout(G, shells)
+                    # Determine edge color based on relation
+                    relation = data.get('relation', '')
+                    if 'located' in relation:
+                        edge_color = '#0066cc'
+                    elif 'finding' in relation:
+                        edge_color = '#6f42c1'
                     else:
-                        pos = nx.kamada_kawai_layout(G)
-                except:
-                    pos = nx.spring_layout(G, k=2.5, iterations=80, seed=42)
+                        edge_color = '#666666'
+                    
+                    # Draw curved arrow
+                    ax.annotate("",
+                        xy=(x2, y2), xycoords='data',
+                        xytext=(x1, y1), textcoords='data',
+                        arrowprops=dict(arrowstyle="-|>",
+                                       color=edge_color,
+                                       lw=1.5,
+                                       connectionstyle="arc3,rad=0.1",
+                                       alpha=0.6))
+                    
+                    # Add edge label at midpoint
+                    mid_x = (x1 + x2) / 2
+                    mid_y = (y1 + y2) / 2
+                    ax.text(mid_x, mid_y, relation[:10],
+                           fontsize=7, color=edge_color, fontstyle='italic',
+                           ha='center', va='center', alpha=0.8,
+                           bbox=dict(boxstyle='round,pad=0.15', 
+                                    facecolor='white', edgecolor='none', alpha=0.7))
                 
-                # Collect node attributes for drawing
-                node_colors = [G.nodes[n].get('color', '#888') for n in G.nodes()]
-                node_sizes = [G.nodes[n].get('size', 1000) for n in G.nodes()]
+                # Draw nodes with ellipses - size adapts to label length
+                for node in G.nodes():
+                    x, y = pos[node]
+                    node_data = G.nodes[node]
+                    
+                    fill_color = node_data.get('fill', '#cccccc')
+                    edge_color = node_data.get('edge', '#666666')
+                    text_color = node_data.get('text', '#333333')
+                    label = node_data.get('label', node)
+                    node_type = node_data.get('node_type', 'unknown')
+                    
+                    # Size based on label length and node type
+                    label_len = len(label)
+                    base_width = 0.08 * label_len + 0.3  # Scale with text
+                    base_width = min(max(base_width, 0.6), 1.4)  # Clamp between 0.6 and 1.4
+                    
+                    if node_type == 'observation':
+                        width, height = base_width, 0.25
+                        fontsize = 8
+                    elif node_type == 'region':
+                        width, height = base_width * 0.9, 0.22
+                        fontsize = 7
+                    else:  # entity
+                        width, height = base_width * 0.9, 0.22
+                        fontsize = 7
+                    
+                    # Draw ellipse
+                    ellipse = plt.matplotlib.patches.Ellipse(
+                        (x, y), width=width, height=height,
+                        facecolor=fill_color, edgecolor=edge_color,
+                        linewidth=1.5, alpha=0.95
+                    )
+                    ax.add_patch(ellipse)
+                    
+                    # Draw label with DARK text
+                    ax.text(x, y, label, ha='center', va='center',
+                           fontsize=fontsize, fontweight='bold', color=text_color)
                 
-                # Draw edges with arrows and labels (like pipeline.png)
-                edge_colors = [G.edges[e].get('color', '#888') for e in G.edges()]
+                # Add column headers at the top
+                header_y = max(p[1] for p in pos.values()) + 0.35
+                ax.text(-2.0, header_y, 'REGIONS', ha='center', fontsize=11, fontweight='bold', color='#004085')
+                ax.text(0.0, header_y, 'OBSERVATIONS', ha='center', fontsize=11, fontweight='bold', color='#333333')
+                ax.text(2.0, header_y, 'ENTITIES', ha='center', fontsize=11, fontweight='bold', color='#4a235a')
                 
-                # Draw curved edges with arrows
-                nx.draw_networkx_edges(G, pos, ax=ax1,
-                                       edge_color=edge_colors,
-                                       width=2.0,
-                                       alpha=0.7,
-                                       arrows=True,
-                                       arrowsize=15,
-                                       arrowstyle='-|>',
-                                       connectionstyle='arc3,rad=0.1',
-                                       node_size=node_sizes)
+                # Set title
+                ax.set_title(f'Scene Graph: {patient_id} / {study_id}\n'
+                            f'{n_obs} Observations | {n_reg} Regions | {n_ent} Entities',
+                            fontsize=14, fontweight='bold', pad=20)
                 
-                # Draw edge labels (relation names like in pipeline.png)
-                edge_labels = {(u, v): d.get('relation', '')[:10] 
-                              for u, v, d in G.edges(data=True)}
-                nx.draw_networkx_edge_labels(G, pos, edge_labels, ax=ax1,
-                                            font_size=7, font_color='#555',
-                                            label_pos=0.5,
-                                            bbox=dict(boxstyle='round,pad=0.1',
-                                                     facecolor='white', 
-                                                     alpha=0.8,
-                                                     edgecolor='none'))
-                
-                # Draw nodes as ellipses (like pipeline.png)
-                nx.draw_networkx_nodes(G, pos, ax=ax1,
-                                       node_color=node_colors,
-                                       node_size=node_sizes,
-                                       alpha=0.95,
-                                       node_shape='o')
-                
-                # Draw labels inside nodes
-                labels = {n: G.nodes[n].get('label', n) for n in G.nodes()}
-                nx.draw_networkx_labels(G, pos, labels, ax=ax1,
-                                        font_size=7, font_weight='bold',
-                                        font_color='white')
-                
-                ax1.set_title(f'Scene Graph: {patient_id} / {study_id}\n'
-                             f'(Directed Graph with {len(G.nodes())} nodes, {len(G.edges())} edges)',
-                             fontsize=14, fontweight='bold', pad=20)
-                ax1.axis('off')
-                
-                # Add a box around the graph area (like pipeline.png)
-                ax1.set_xlim(ax1.get_xlim()[0] - 0.1, ax1.get_xlim()[1] + 0.1)
-                ax1.set_ylim(ax1.get_ylim()[0] - 0.1, ax1.get_ylim()[1] + 0.1)
-                
-                # Panel 2: Legend (styled like pipeline.png)
-                ax2 = fig.add_subplot(gs[0, 1])
-                ax2.axis('off')
-                
-                legend_y = 0.95
-                ax2.text(0.1, legend_y, 'NODE TYPES', fontsize=12, fontweight='bold',
-                        transform=ax2.transAxes)
-                
-                legend_items = [
-                    (COLOR_OBS_POS, 'Positive Finding (+)', 'o'),
-                    (COLOR_OBS_NEG, 'Negative Finding (-)', 'o'),
-                    (COLOR_OBS_UNK, 'Uncertain Finding (?)', 'o'),
-                    (COLOR_REGION, 'Anatomical Region', 's'),
-                    (COLOR_ENTITY, 'Medical Entity', '^'),
+                # Add legend
+                legend_elements = [
+                    plt.matplotlib.patches.Patch(facecolor=NODE_STYLES['obs_pos']['fill'], 
+                                                 edgecolor=NODE_STYLES['obs_pos']['edge'], 
+                                                 linewidth=2, label='Positive Finding'),
+                    plt.matplotlib.patches.Patch(facecolor=NODE_STYLES['obs_neg']['fill'], 
+                                                 edgecolor=NODE_STYLES['obs_neg']['edge'], 
+                                                 linewidth=2, label='Negative Finding'),
+                    plt.matplotlib.patches.Patch(facecolor=NODE_STYLES['obs_unk']['fill'], 
+                                                 edgecolor=NODE_STYLES['obs_unk']['edge'], 
+                                                 linewidth=2, label='Uncertain'),
+                    plt.matplotlib.patches.Patch(facecolor=NODE_STYLES['region']['fill'], 
+                                                 edgecolor=NODE_STYLES['region']['edge'], 
+                                                 linewidth=2, label='Anatomical Region'),
+                    plt.matplotlib.patches.Patch(facecolor=NODE_STYLES['entity']['fill'], 
+                                                 edgecolor=NODE_STYLES['entity']['edge'], 
+                                                 linewidth=2, label='Medical Entity'),
                 ]
+                ax.legend(handles=legend_elements, loc='lower right', 
+                         fontsize=10, framealpha=0.95)
                 
-                for i, (color, label, marker) in enumerate(legend_items):
-                    y_pos = legend_y - 0.08 - (i * 0.07)
-                    ax2.scatter([0.12], [y_pos], c=color, s=200, marker=marker,
-                               transform=ax2.transAxes)
-                    ax2.text(0.2, y_pos, label, fontsize=10, va='center',
-                            transform=ax2.transAxes)
-                
-                # Edge legend
-                edge_y = 0.45
-                ax2.text(0.1, edge_y, 'EDGE TYPES', fontsize=12, fontweight='bold',
-                        transform=ax2.transAxes)
-                
-                edge_items = [
-                    (EDGE_LOCATED, 'located_in', '-->'),
-                    (EDGE_HAS_ENTITY, 'finding/entity', '-->'),
-                    (EDGE_CHILD, 'parent-child', '-->'),
-                    (EDGE_REGION_REL, 'region relation', '-->'),
-                ]
-                
-                for i, (color, label, arrow) in enumerate(edge_items):
-                    y_pos = edge_y - 0.08 - (i * 0.07)
-                    ax2.plot([0.1, 0.18], [y_pos, y_pos], color=color, linewidth=3,
-                            transform=ax2.transAxes)
-                    ax2.text(0.2, y_pos, label, fontsize=10, va='center',
-                            transform=ax2.transAxes)
-                
-                # Panel 3: Graph Statistics
-                ax3 = fig.add_subplot(gs[0, 2])
-                ax3.axis('off')
-                
-                # Count node types
-                n_obs = len([n for n in G.nodes() if G.nodes[n].get('node_type') == 'observation'])
-                n_pos = len([n for n in G.nodes() if G.nodes[n].get('polarity') == 'pos'])
-                n_neg = len([n for n in G.nodes() if G.nodes[n].get('polarity') == 'neg'])
-                n_regions = len([n for n in G.nodes() if n.startswith('R:')])
-                n_entities = len([n for n in G.nodes() if n.startswith('E:')])
-                
-                stats_text = f"""STATISTICS
-━━━━━━━━━━━━━━
-
-Nodes: {len(G.nodes())}
-Edges: {len(G.edges())}
-
-OBSERVATIONS
-  Total: {n_obs}
-  Positive: {n_pos}
-  Negative: {n_neg}
-  
-CONNECTED
-  Regions: {n_regions}
-  Entities: {n_entities}
-
-RELATIONS
-  located_in: {sum(1 for _,_,d in G.edges(data=True) if d.get('relation')=='located_in')}
-  finding: {sum(1 for _,_,d in G.edges(data=True) if d.get('relation')=='finding')}
-  other: {sum(1 for _,_,d in G.edges(data=True) if d.get('relation') not in ['located_in', 'finding'])}"""
-                
-                ax3.text(0.05, 0.95, stats_text, transform=ax3.transAxes,
-                        fontsize=9, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='#f8f9fa', 
-                                 edgecolor='#dee2e6', alpha=0.95))
-                
-                # Panel 4: Observations list with clinical details
-                ax4 = fig.add_subplot(gs[1, 1:])
-                ax4.axis('off')
-                
-                # Build observation summary table
-                obs_text = "OBSERVATIONS DETAIL\n" + "━" * 70 + "\n\n"
-                
-                for i, (obs_id, obs) in enumerate(obs_list[:8]):
-                    polarity = obs.get('positiveness', '?')
-                    marker = "[+]" if polarity == 'pos' else "[-]" if polarity == 'neg' else "[?]"
-                    name = obs.get('name', 'unknown')[:35]
-                    
-                    # Get regions (using CORRECT field)
-                    regions_list = obs.get('regions', [])
-                    region_strs = []
-                    for r in regions_list[:2]:
-                        if isinstance(r, dict):
-                            region_strs.append(r.get('region', '?')[:15])
-                        else:
-                            region_strs.append(str(r)[:15])
-                    regions_str = ', '.join(region_strs) if region_strs else 'N/A'
-                    
-                    # Get entities
-                    entities = obs.get('obs_entities', [])[:2]
-                    entities_str = ', '.join(e[:12] for e in entities) if entities else 'N/A'
-                    
-                    obs_text += f"{marker} {name}\n"
-                    obs_text += f"    Region: {regions_str}  |  Entity: {entities_str}\n\n"
-                
-                ax4.text(0.02, 0.95, obs_text, transform=ax4.transAxes,
-                        fontsize=9, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='lightyellow', 
-                                 edgecolor='#f0ad4e', alpha=0.95))
+                # Set axis limits with padding - accommodate all nodes
+                ax.set_xlim(-3.5, 3.5)
+                y_padding = 0.5
+                y_min = min(p[1] for p in pos.values()) - y_padding
+                y_max = max(p[1] for p in pos.values()) + y_padding + 0.4  # Extra for headers
+                ax.set_ylim(y_min, y_max)
+                ax.set_aspect('auto')  # Allow flexible aspect ratio
+                ax.axis('off')
                 
                 plt.tight_layout()
                 out_path = viz_dir / f"network_{successful+1:02d}_{patient_id}_{study_id}.png"
-                plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
+                plt.savefig(out_path, dpi=150, bbox_inches='tight', 
+                           facecolor='white', edgecolor='none')
                 plt.close(fig)
                 
-                logger.info(f"  [OK] Pipeline-style graph saved: {out_path.name}")
+                logger.info(f"  [OK] Organized scene graph saved: {out_path.name}")
                 successful += 1
                 
             except Exception as e:
@@ -4055,7 +3985,7 @@ RELATIONS
                 continue
         
         if successful > 0:
-            logger.info(f"\n[NETWORK] {successful} pipeline-style network graphs saved to: {viz_dir}")
+            logger.info(f"\n[NETWORK] {successful} organized scene graph visualizations saved to: {viz_dir}")
         
         # Also create the old-style summary panels
         self._visualize_scene_graph_panels(num_samples)

@@ -233,7 +233,7 @@ log_step "[4/8] Checking NVIDIA/CUDA Setup"
 
 if [ "$SKIP_DRIVERS" = true ]; then
     log_info "Skipping driver installation (--skip-drivers)"
-    if command -v nvidia-smi &> /dev/null; then
+if command -v nvidia-smi &> /dev/null; then
         log_info "NVIDIA driver detected:"
         nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv
     fi

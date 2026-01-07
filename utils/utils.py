@@ -26,18 +26,18 @@ class AverageMeter:
     Computes and stores the average and current value.
     Used for tracking training metrics.
     """
-    
+
     def __init__(self, name: str = '', fmt: str = ':f'):
         self.name = name
         self.fmt = fmt
         self.reset()
-    
+
     def reset(self):
         self.val = 0
         self.avg = 0
         self.sum = 0
         self.count = 0
-    
+
     def update(self, val: float, n: int = 1):
         self.val = val
         self.sum += val * n

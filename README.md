@@ -137,7 +137,7 @@ python evaluate.py \
 
 The training pipeline automatically detects your hardware and optimizes settings:
 
-```bash
+```bash 
 # Check detected hardware and optimal settings
 python -m utils.hardware_utils
 ```
