@@ -106,8 +106,8 @@ training:
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 4
   
-  # Hugging Face Hub
-  hub_model_id: ""  # Set via env or command line
+  # Hugging Face Hub - UPDATE WITH YOUR HF USERNAME
+  hub_model_id: "KYAGABA/mimic-cxr-vqa-pretrain"  # Your HF repo
   hub_private_repo: true
   push_to_hub_strategy: "checkpoint"  # Push every checkpoint
   
@@ -116,8 +116,8 @@ training:
 wandb:
   enabled: true
   project: "mimic-cxr-vqa"
-  entity: ""  # Set via WANDB_ENTITY env var
-  name: "pretrain-b-grade"
+  entity: "kyagabajonah"  # Your wandb username
+  name: "pretrain-all-data"
   group: "pretraining"
   tags: ["ssg-vqa", "mimic-cxr", "pretrain", "b-grade", "gcp-l4"]
   notes: "Pre-training on B-grade data (31.2M pairs)"
