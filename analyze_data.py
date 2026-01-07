@@ -574,89 +574,578 @@ class DataAnalyzer:
             self.report.warnings.append(f"Image metadata error: {e}")
     
     def _analyze_qba_metadata_files(self):
-        """Analyze all MIMIC-Ext-CXR-QBA metadata CSV files."""
+        """Analyze all MIMIC-Ext-CXR-QBA metadata CSV files with FULL column analysis."""
         metadata_dir = self.mimic_qa_path / 'metadata'
         
         if not metadata_dir.exists():
-            logger.warning(f"⚠ QBA metadata directory not found: {metadata_dir}")
+            logger.warning(f"[!] QBA metadata directory not found: {metadata_dir}")
             return
         
-        # List of expected metadata files
-        metadata_files = [
-            'patient_metadata.csv.gz',
-            'study_metadata.csv.gz', 
-            'image_metadata.csv.gz',
-            'question_metadata.csv.gz',
-            'answer_metadata.csv.gz',
-        ]
+        # List of expected metadata files with descriptions
+        metadata_files = {
+            'patient_metadata': 'Patient-level aggregated information',
+            'study_metadata': 'Study-level metadata including quality metrics', 
+            'image_metadata': 'Image-level view positions and dimensions',
+            'question_metadata': 'Question types, strategies, and quality ratings',
+            'answer_metadata': 'Answer types, entities, and localization info',
+        }
         
-        for filename in metadata_files:
-            filepath = metadata_dir / filename
-            parquet_path = metadata_dir / filename.replace('.csv.gz', '.parquet')
+        for base_name, description in metadata_files.items():
+            parquet_path = metadata_dir / f"{base_name}.parquet"
+            csv_path = metadata_dir / f"{base_name}.csv.gz"
+            
+            df = None
+            source = None
+            sampled = False
             
             # Try parquet first (faster)
             if parquet_path.exists():
                 try:
                     df = pd.read_parquet(parquet_path)
-                    self._log_metadata_file_info(filename.replace('.csv.gz', '.parquet'), df)
-                    continue
+                    source = parquet_path.name
                 except Exception:
                     pass
             
-            if filepath.exists():
+            # Fall back to CSV
+            if df is None and csv_path.exists():
                 try:
-                    logger.info(f"\n  Loading {filename}...")
-                    df = pd.read_csv(filepath, compression='gzip', nrows=100000)  # Sample for large files
-                    self._log_metadata_file_info(filename, df, sampled=True)
+                    # Sample large files
+                    df = pd.read_csv(csv_path, compression='gzip', nrows=500000)
+                    source = csv_path.name
+                    sampled = True
                 except Exception as e:
-                    logger.warning(f"    Error loading {filename}: {e}")
-            else:
-                logger.debug(f"    File not found: {filename}")
+                    logger.warning(f"    Error loading {csv_path.name}: {e}")
+                    continue
+            
+            if df is not None:
+                self._analyze_metadata_columns(source, df, description, sampled)
         
-        # Check dataset_info.json
+        # Analyze dataset_info.json comprehensively
         dataset_info_path = metadata_dir / 'dataset_info.json'
         if dataset_info_path.exists():
-            try:
-                with open(dataset_info_path) as f:
-                    dataset_info = json.load(f)
-                logger.info(f"\n  📚 dataset_info.json:")
-                logger.info(f"    Keys: {list(dataset_info.keys())}")
-                if 'finding_entities' in dataset_info:
-                    logger.info(f"    Finding entities: {len(dataset_info['finding_entities'])} types")
-                if 'region_names' in dataset_info:
-                    logger.info(f"    Region names: {len(dataset_info['region_names'])} types")
-            except Exception as e:
-                logger.warning(f"    Error loading dataset_info.json: {e}")
+            self._analyze_dataset_info_json(dataset_info_path)
     
-    def _log_metadata_file_info(self, filename: str, df: pd.DataFrame, sampled: bool = False):
-        """Log detailed info about a metadata CSV/parquet file."""
-        sample_note = " (sampled 100k rows)" if sampled else ""
-        logger.info(f"    📄 {filename}{sample_note}")
-        logger.info(f"       Rows: {len(df):,} | Columns: {len(df.columns)}")
-        logger.info(f"       Columns: {list(df.columns)[:8]}{'...' if len(df.columns) > 8 else ''}")
+    def _analyze_metadata_columns(self, filename: str, df: pd.DataFrame, description: str, sampled: bool = False):
+        """Perform comprehensive column-by-column analysis of a metadata file."""
+        sample_note = " (sampled)" if sampled else ""
         
-        # Store in report
-        self.report.metadata_csv_info[filename] = {
+        logger.info(f"\n  {'='*60}")
+        logger.info(f"  [METADATA] {filename}{sample_note}")
+        logger.info(f"  {description}")
+        logger.info(f"  {'='*60}")
+        logger.info(f"  Shape: {len(df):,} rows x {len(df.columns)} columns")
+        logger.info(f"  Memory: {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
+        
+        # Store comprehensive info
+        file_info = {
             'rows': len(df),
             'columns': len(df.columns),
-            'column_names': list(df.columns),
+            'memory_mb': round(df.memory_usage(deep=True).sum() / 1024**2, 2),
             'sampled': sampled,
-            'sample_values': {}
+            'column_analysis': {}
         }
         
-        # Show sample values for key columns
-        for col in df.columns[:5]:
-            try:
-                if df[col].dtype == 'object':
-                    unique_vals = df[col].dropna().unique()[:3]
-                    self.report.metadata_csv_info[filename]['sample_values'][col] = [str(v)[:30] for v in unique_vals]
+        # Column-by-column analysis
+        logger.info(f"\n  {'Column':<45} {'Type':<12} {'Non-Null':>10} {'Unique':>10} {'Analysis'}")
+        logger.info(f"  {'-'*110}")
+        
+        for col in df.columns:
+            col_analysis = self._analyze_single_column(df, col)
+            file_info['column_analysis'][col] = col_analysis
+            
+            # Truncate column name for display
+            col_display = col[:44] + '..' if len(col) > 44 else col
+            
+            logger.info(f"  {col_display:<45} {col_analysis['dtype']:<12} {col_analysis['non_null_count']:>10,} {col_analysis['unique_count']:>10,} {col_analysis['summary'][:40]}")
+        
+        self.report.metadata_csv_info[filename] = file_info
+        
+        # Show key distributions for important columns
+        self._show_key_distributions(filename, df)
+        
+        # Generate column visualizations for this file
+        self._visualize_metadata_columns(filename, df)
+    
+    def _analyze_single_column(self, df: pd.DataFrame, col: str) -> Dict[str, Any]:
+        """Analyze a single column comprehensively based on its data type."""
+        dtype = str(df[col].dtype)
+        non_null = int(df[col].notna().sum())
+        null_pct = (1 - non_null / len(df)) * 100 if len(df) > 0 else 0
+        n_unique = int(df[col].nunique())
+        
+        analysis = {
+            'dtype': dtype,
+            'non_null_count': non_null,
+            'null_count': int(len(df) - non_null),
+            'null_percentage': round(null_pct, 2),
+            'unique_count': n_unique,
+            'unique_ratio': round(n_unique / non_null, 4) if non_null > 0 else 0,
+            'summary': '',
+            'statistics': {},
+            'value_distribution': {},
+            'data_quality': {}
+        }
+        
+        try:
+            # Determine column type and analyze accordingly
+            if df[col].dtype == 'bool':
+                # Boolean analysis
+                true_count = int(df[col].sum())
+                false_count = int((~df[col]).sum())
+                true_pct = true_count / non_null * 100 if non_null > 0 else 0
+                
+                analysis['statistics'] = {
+                    'true_count': true_count,
+                    'false_count': false_count,
+                    'true_percentage': round(true_pct, 2)
+                }
+                analysis['value_distribution'] = {'True': true_count, 'False': false_count}
+                analysis['summary'] = f"True: {true_pct:.1f}%, False: {100-true_pct:.1f}%"
+                analysis['column_type'] = 'boolean'
+                
+            elif df[col].dtype in ['int64', 'int32', 'int16', 'int8']:
+                # Integer analysis
+                stats = df[col].describe()
+                analysis['statistics'] = {
+                    'min': int(stats['min']),
+                    'max': int(stats['max']),
+                    'mean': round(float(stats['mean']), 2),
+                    'std': round(float(stats['std']), 2),
+                    'median': int(stats['50%']),
+                    'q25': int(stats['25%']),
+                    'q75': int(stats['75%']),
+                }
+                
+                # Check if it's a small set of integers (categorical-like)
+                if n_unique <= 20:
+                    value_counts = df[col].value_counts().head(10)
+                    analysis['value_distribution'] = {str(k): int(v) for k, v in value_counts.items()}
+                    analysis['column_type'] = 'integer_categorical'
+                    analysis['summary'] = f"min={stats['min']:.0f}, max={stats['max']:.0f}, {n_unique} unique"
                 else:
-                    self.report.metadata_csv_info[filename]['sample_values'][col] = {
-                        'min': float(df[col].min()) if pd.notna(df[col].min()) else None,
-                        'max': float(df[col].max()) if pd.notna(df[col].max()) else None,
-                    }
-            except Exception:
-                pass
+                    analysis['column_type'] = 'integer_continuous'
+                    analysis['summary'] = f"range=[{stats['min']:.0f}, {stats['max']:.0f}], mean={stats['mean']:.1f}"
+                
+            elif df[col].dtype in ['float64', 'float32', 'float16']:
+                # Float analysis
+                stats = df[col].describe()
+                analysis['statistics'] = {
+                    'min': round(float(stats['min']), 4),
+                    'max': round(float(stats['max']), 4),
+                    'mean': round(float(stats['mean']), 4),
+                    'std': round(float(stats['std']), 4),
+                    'median': round(float(stats['50%']), 4),
+                    'q25': round(float(stats['25%']), 4),
+                    'q75': round(float(stats['75%']), 4),
+                }
+                analysis['column_type'] = 'float_continuous'
+                analysis['summary'] = f"range=[{stats['min']:.2f}, {stats['max']:.2f}], mean={stats['mean']:.2f}"
+                
+            elif df[col].dtype == 'object' or str(df[col].dtype).startswith('str') or str(df[col].dtype) == 'category':
+                # String/categorical analysis
+                value_counts = df[col].value_counts()
+                top_n = min(20, n_unique)
+                top_values = value_counts.head(top_n)
+                
+                analysis['value_distribution'] = {str(k): int(v) for k, v in top_values.items()}
+                analysis['statistics'] = {
+                    'most_common': str(value_counts.index[0]) if len(value_counts) > 0 else None,
+                    'most_common_count': int(value_counts.iloc[0]) if len(value_counts) > 0 else 0,
+                    'most_common_pct': round(value_counts.iloc[0] / non_null * 100, 2) if non_null > 0 and len(value_counts) > 0 else 0,
+                }
+                
+                # String length stats
+                str_lengths = df[col].dropna().astype(str).str.len()
+                if len(str_lengths) > 0:
+                    analysis['statistics']['avg_string_length'] = round(float(str_lengths.mean()), 1)
+                    analysis['statistics']['max_string_length'] = int(str_lengths.max())
+                
+                if n_unique <= 10:
+                    analysis['column_type'] = 'string_categorical_low'
+                    vals = ', '.join([f"'{str(k)[:15]}'" for k in list(value_counts.index)[:3]])
+                    analysis['summary'] = f"{n_unique} values: {vals}"
+                elif n_unique <= 50:
+                    analysis['column_type'] = 'string_categorical_medium'
+                    analysis['summary'] = f"{n_unique} unique, top='{str(value_counts.index[0])[:20]}'"
+                else:
+                    analysis['column_type'] = 'string_high_cardinality'
+                    analysis['summary'] = f"{n_unique:,} unique values"
+                    
+            else:
+                # Other types (datetime, etc.)
+                analysis['column_type'] = 'other'
+                analysis['summary'] = f"{dtype}, {n_unique:,} unique"
+                
+            # Data quality checks
+            analysis['data_quality'] = {
+                'has_nulls': null_pct > 0,
+                'null_severity': 'high' if null_pct > 20 else 'medium' if null_pct > 5 else 'low',
+                'is_constant': n_unique == 1,
+                'is_unique': n_unique == non_null,
+            }
+                
+        except Exception as e:
+            analysis['summary'] = f"Error: {str(e)[:30]}"
+            analysis['column_type'] = 'error'
+        
+        return analysis
+    
+    def _visualize_metadata_columns(self, filename: str, df: pd.DataFrame):
+        """Generate visualizations for metadata columns based on their types."""
+        if not PLOTTING_AVAILABLE:
+            return
+        
+        # Create output directory for this file
+        viz_dir = self.output_dir / 'column_analysis' / filename.replace('.', '_')
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Separate columns by type for visualization
+        bool_cols = [c for c in df.columns if df[c].dtype == 'bool']
+        int_cols = [c for c in df.columns if df[c].dtype in ['int64', 'int32', 'int16', 'int8']]
+        float_cols = [c for c in df.columns if df[c].dtype in ['float64', 'float32', 'float16']]
+        str_cols = [c for c in df.columns if df[c].dtype == 'object' or str(df[c].dtype).startswith('str')]
+        
+        # Limit to avoid too many plots
+        max_plots_per_type = 6
+        
+        # ===== Boolean Columns =====
+        if bool_cols:
+            n_cols = min(len(bool_cols), max_plots_per_type)
+            fig, axes = plt.subplots(1, n_cols, figsize=(4*n_cols, 4))
+            if n_cols == 1:
+                axes = [axes]
+            
+            for i, col in enumerate(bool_cols[:n_cols]):
+                ax = axes[i]
+                counts = df[col].value_counts()
+                colors = ['#2ecc71', '#e74c3c']
+                ax.pie(counts.values, labels=['True', 'False'], autopct='%1.1f%%', 
+                      colors=colors[:len(counts)], startangle=90)
+                ax.set_title(col.split('.')[-1][:25], fontsize=9)
+            
+            plt.suptitle(f'{filename}: Boolean Columns', fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(viz_dir / 'boolean_columns.png', dpi=120, bbox_inches='tight')
+            plt.close()
+        
+        # ===== Integer Columns =====
+        if int_cols:
+            n_cols = min(len(int_cols), max_plots_per_type)
+            fig, axes = plt.subplots(2, (n_cols+1)//2, figsize=(5*((n_cols+1)//2), 8))
+            axes = axes.flatten() if n_cols > 1 else [axes]
+            
+            for i, col in enumerate(int_cols[:n_cols]):
+                ax = axes[i]
+                col_data = df[col].dropna()
+                n_unique = col_data.nunique()
+                
+                if n_unique <= 15:
+                    # Bar chart for low cardinality
+                    value_counts = col_data.value_counts().sort_index()
+                    colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(value_counts)))
+                    ax.bar(value_counts.index.astype(str), value_counts.values, color=colors)
+                    ax.set_xlabel('Value')
+                    ax.set_ylabel('Count')
+                    ax.tick_params(axis='x', rotation=45)
+                else:
+                    # Histogram for high cardinality
+                    ax.hist(col_data, bins=min(50, n_unique), color='steelblue', edgecolor='white', alpha=0.8)
+                    ax.set_xlabel('Value')
+                    ax.set_ylabel('Frequency')
+                    
+                    # Add statistics
+                    mean_val = col_data.mean()
+                    median_val = col_data.median()
+                    ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mean_val:.1f}')
+                    ax.axvline(median_val, color='orange', linestyle=':', linewidth=1.5, label=f'Median: {median_val:.1f}')
+                    ax.legend(fontsize=7)
+                
+                ax.set_title(col.split('.')[-1][:25], fontsize=9)
+                ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+            
+            # Hide empty subplots
+            for j in range(i+1, len(axes)):
+                axes[j].axis('off')
+            
+            plt.suptitle(f'{filename}: Integer Columns', fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(viz_dir / 'integer_columns.png', dpi=120, bbox_inches='tight')
+            plt.close()
+        
+        # ===== Float Columns =====
+        if float_cols:
+            n_cols = min(len(float_cols), max_plots_per_type)
+            fig, axes = plt.subplots(2, (n_cols+1)//2, figsize=(5*((n_cols+1)//2), 8))
+            axes = axes.flatten() if n_cols > 1 else [axes]
+            
+            for i, col in enumerate(float_cols[:n_cols]):
+                ax = axes[i]
+                col_data = df[col].dropna()
+                
+                # Histogram with KDE-like appearance
+                ax.hist(col_data, bins=50, color='teal', edgecolor='white', alpha=0.7)
+                
+                # Add statistics box
+                stats_text = f"Mean: {col_data.mean():.3f}\nStd: {col_data.std():.3f}\nMin: {col_data.min():.3f}\nMax: {col_data.max():.3f}"
+                ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, fontsize=7,
+                       verticalalignment='top', horizontalalignment='right',
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                
+                ax.set_xlabel('Value')
+                ax.set_ylabel('Frequency')
+                ax.set_title(col.split('.')[-1][:25], fontsize=9)
+                ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+            
+            # Hide empty subplots
+            for j in range(i+1, len(axes)):
+                axes[j].axis('off')
+            
+            plt.suptitle(f'{filename}: Float Columns', fontweight='bold')
+            plt.tight_layout()
+            plt.savefig(viz_dir / 'float_columns.png', dpi=120, bbox_inches='tight')
+            plt.close()
+        
+        # ===== String/Categorical Columns =====
+        # Only visualize low-to-medium cardinality string columns
+        str_cols_viz = [c for c in str_cols if df[c].nunique() <= 30]
+        
+        if str_cols_viz:
+            n_cols = min(len(str_cols_viz), max_plots_per_type)
+            fig, axes = plt.subplots(n_cols, 1, figsize=(12, 4*n_cols))
+            if n_cols == 1:
+                axes = [axes]
+            
+            for i, col in enumerate(str_cols_viz[:n_cols]):
+                ax = axes[i]
+                value_counts = df[col].value_counts().head(15)
+                
+                # Truncate long labels
+                labels = [str(v)[:30] + ('...' if len(str(v)) > 30 else '') for v in value_counts.index]
+                colors = plt.cm.Paired(np.linspace(0, 1, len(value_counts)))
+                
+                bars = ax.barh(labels, value_counts.values, color=colors)
+                ax.set_xlabel('Count')
+                ax.set_title(f'{col} ({df[col].nunique()} unique values)', fontsize=10, fontweight='bold')
+                ax.invert_yaxis()
+                ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+                
+                # Add percentage labels
+                total = len(df)
+                for bar, count in zip(bars, value_counts.values):
+                    pct = count / total * 100
+                    ax.text(bar.get_width() + total*0.01, bar.get_y() + bar.get_height()/2,
+                           f'{pct:.1f}%', va='center', fontsize=8)
+            
+            plt.suptitle(f'{filename}: Categorical Columns', fontweight='bold', y=1.01)
+            plt.tight_layout()
+            plt.savefig(viz_dir / 'categorical_columns.png', dpi=120, bbox_inches='tight')
+            plt.close()
+        
+        # ===== Summary Overview =====
+        self._create_column_summary_plot(filename, df, viz_dir)
+        
+        logger.info(f"  [VIZ] Column analysis plots saved to: {viz_dir}")
+    
+    def _create_column_summary_plot(self, filename: str, df: pd.DataFrame, viz_dir: Path):
+        """Create a summary overview of all columns in the file."""
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # 1. Data types distribution
+        ax1 = axes[0, 0]
+        dtype_counts = df.dtypes.astype(str).value_counts()
+        colors = plt.cm.Set2(np.linspace(0, 1, len(dtype_counts)))
+        ax1.pie(dtype_counts.values, labels=dtype_counts.index, autopct='%1.1f%%', colors=colors)
+        ax1.set_title('Column Data Types', fontweight='bold')
+        
+        # 2. Null percentage per column
+        ax2 = axes[0, 1]
+        null_pcts = (df.isnull().sum() / len(df) * 100).sort_values(ascending=True)
+        if len(null_pcts) > 20:
+            null_pcts = null_pcts.tail(20)  # Show top 20 with most nulls
+        
+        colors = ['#e74c3c' if p > 20 else '#f39c12' if p > 5 else '#2ecc71' for p in null_pcts.values]
+        ax2.barh([c.split('.')[-1][:20] for c in null_pcts.index], null_pcts.values, color=colors)
+        ax2.set_xlabel('Null Percentage (%)')
+        ax2.set_title('Missing Values by Column', fontweight='bold')
+        ax2.axvline(5, color='orange', linestyle='--', alpha=0.7, label='5% threshold')
+        ax2.axvline(20, color='red', linestyle='--', alpha=0.7, label='20% threshold')
+        ax2.legend(fontsize=8)
+        
+        # 3. Unique value counts (log scale)
+        ax3 = axes[1, 0]
+        unique_counts = df.nunique().sort_values(ascending=False)
+        if len(unique_counts) > 15:
+            unique_counts = unique_counts.head(15)
+        
+        colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(unique_counts)))
+        ax3.barh([c.split('.')[-1][:20] for c in unique_counts.index], unique_counts.values, color=colors)
+        ax3.set_xlabel('Unique Values (log scale)')
+        ax3.set_xscale('log')
+        ax3.set_title('Unique Values per Column (Top 15)', fontweight='bold')
+        ax3.invert_yaxis()
+        
+        # 4. Column overview table
+        ax4 = axes[1, 1]
+        ax4.axis('off')
+        
+        # Create summary text
+        n_rows = len(df)
+        n_cols = len(df.columns)
+        n_nulls = df.isnull().sum().sum()
+        n_bool = sum(1 for c in df.columns if df[c].dtype == 'bool')
+        n_int = sum(1 for c in df.columns if df[c].dtype in ['int64', 'int32', 'int16', 'int8'])
+        n_float = sum(1 for c in df.columns if df[c].dtype in ['float64', 'float32'])
+        n_str = sum(1 for c in df.columns if df[c].dtype == 'object')
+        
+        summary_text = f"""
+FILE SUMMARY
+{'='*40}
+
+Rows:                {n_rows:>15,}
+Columns:             {n_cols:>15,}
+Total Cells:         {n_rows * n_cols:>15,}
+Total Nulls:         {n_nulls:>15,}
+Null Percentage:     {n_nulls / (n_rows * n_cols) * 100:>14.2f}%
+
+COLUMN TYPES
+{'='*40}
+Boolean:             {n_bool:>15}
+Integer:             {n_int:>15}
+Float:               {n_float:>15}
+String/Object:       {n_str:>15}
+
+MEMORY USAGE
+{'='*40}
+Total Memory:        {df.memory_usage(deep=True).sum() / 1024**2:>12.2f} MB
+Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} KB
+"""
+        ax4.text(0.1, 0.95, summary_text, transform=ax4.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
+        
+        plt.suptitle(f'Column Analysis Summary: {filename}', fontsize=14, fontweight='bold', y=1.01)
+        plt.tight_layout()
+        plt.savefig(viz_dir / 'column_summary.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    def _show_key_distributions(self, filename: str, df: pd.DataFrame):
+        """Show distributions for key columns based on file type."""
+        
+        # Question metadata specific analysis
+        if 'question' in filename.lower():
+            if 'question.question_type' in df.columns:
+                logger.info(f"\n  [Distribution] question.question_type:")
+                dist = df['question.question_type'].value_counts().head(10)
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {val:<40} {cnt:>12,} ({pct:>5.1f}%)")
+            
+            if 'question.question_strategy' in df.columns:
+                logger.info(f"\n  [Distribution] question.question_strategy:")
+                dist = df['question.question_strategy'].value_counts()
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {val:<40} {cnt:>12,} ({pct:>5.1f}%)")
+            
+            if 'question.quality.rating' in df.columns:
+                logger.info(f"\n  [Distribution] question.quality.rating:")
+                dist = df['question.quality.rating'].value_counts().sort_index()
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    Rating {val:<35} {cnt:>12,} ({pct:>5.1f}%)")
+        
+        # Answer metadata specific analysis
+        elif 'answer' in filename.lower():
+            if 'answer.answer_type' in df.columns:
+                logger.info(f"\n  [Distribution] answer.answer_type:")
+                dist = df['answer.answer_type'].value_counts()
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {val:<40} {cnt:>12,} ({pct:>5.1f}%)")
+            
+            if 'answer.positiveness' in df.columns:
+                logger.info(f"\n  [Distribution] answer.positiveness:")
+                dist = df['answer.positiveness'].value_counts()
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {val:<40} {cnt:>12,} ({pct:>5.1f}%)")
+        
+        # Study metadata specific analysis
+        elif 'study' in filename.lower():
+            if 'study.procedure' in df.columns:
+                logger.info(f"\n  [Distribution] study.procedure:")
+                dist = df['study.procedure'].value_counts().head(5)
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {str(val)[:40]:<40} {cnt:>12,} ({pct:>5.1f}%)")
+            
+            if 'study.num_observations' in df.columns:
+                logger.info(f"\n  [Statistics] study.num_observations:")
+                stats = df['study.num_observations'].describe()
+                logger.info(f"    Mean: {stats['mean']:.2f}, Std: {stats['std']:.2f}")
+                logger.info(f"    Min: {stats['min']:.0f}, Max: {stats['max']:.0f}, Median: {stats['50%']:.0f}")
+        
+        # Image metadata specific analysis
+        elif 'image' in filename.lower():
+            if 'img.view_position' in df.columns:
+                logger.info(f"\n  [Distribution] img.view_position:")
+                dist = df['img.view_position'].value_counts().head(6)
+                for val, cnt in dist.items():
+                    pct = cnt / len(df) * 100
+                    logger.info(f"    {val:<40} {cnt:>12,} ({pct:>5.1f}%)")
+            
+            if 'img.height' in df.columns and 'img.width' in df.columns:
+                logger.info(f"\n  [Statistics] Image Dimensions:")
+                logger.info(f"    Height: {df['img.height'].mean():.0f} +/- {df['img.height'].std():.0f}")
+                logger.info(f"    Width:  {df['img.width'].mean():.0f} +/- {df['img.width'].std():.0f}")
+    
+    def _analyze_dataset_info_json(self, path: Path):
+        """Comprehensively analyze the dataset_info.json file."""
+        try:
+            with open(path) as f:
+                info = json.load(f)
+            
+            logger.info(f"\n  {'='*60}")
+            logger.info(f"  [REFERENCE] dataset_info.json")
+            logger.info(f"  Defines all valid values for tags and categories")
+            logger.info(f"  {'='*60}")
+            
+            for key, values in info.items():
+                if isinstance(values, list):
+                    logger.info(f"  {key}: {len(values)} types")
+                    if len(values) <= 10:
+                        logger.info(f"    Values: {values}")
+                    else:
+                        logger.info(f"    Sample: {values[:5]} ... {values[-3:]}")
+                elif isinstance(values, dict):
+                    logger.info(f"  {key}: {len(values)} entries (dict)")
+            
+            # Store in report
+            self.report.metadata_csv_info['dataset_info.json'] = {
+                'keys': list(info.keys()),
+                'counts': {k: len(v) if isinstance(v, (list, dict)) else 1 for k, v in info.items()}
+            }
+            
+        except Exception as e:
+            logger.warning(f"    Error loading dataset_info.json: {e}")
+    
+    def _analyze_exports_directory(self):
+        """Analyze pre-filtered exports if available."""
+        exports_dir = self.mimic_qa_path / 'exports'
+        if not exports_dir.exists():
+            return
+        
+        logger.info(f"\n  [EXPORTS] Pre-filtered data exports:")
+        
+        for grade_dir in sorted(exports_dir.iterdir()):
+            if grade_dir.is_dir() and grade_dir.name.startswith('grade_'):
+                grade = grade_dir.name.replace('grade_', '')
+                
+                # Count files
+                qa_files = list(grade_dir.glob('qa/*.json'))
+                sg_files = list(grade_dir.glob('scene_graphs/*.json'))
+                
+                logger.info(f"    Grade {grade}: {len(qa_files):,} QA files, {len(sg_files):,} scene graphs")
     
     def _analyze_cross_dataset_correlation(self):
         """Analyze correlation between MIMIC-CXR-JPG and MIMIC-Ext-CXR-QBA."""
@@ -1291,44 +1780,240 @@ class DataAnalyzer:
             plt.close()
             logger.info(f"📊 Image metadata plots saved to: {plot_path}")
         
-        # ============ Plot 4: Dataset Summary ============
-        fig, ax = plt.subplots(figsize=(12, 8))
-        ax.axis('off')
+        # ============ Plot 4: Dataset Summary Card ============
+        fig, axes = plt.subplots(1, 3, figsize=(18, 8))
         
-        summary_text = f"""
-╔══════════════════════════════════════════════════════════════════════╗
-║                    MIMIC-CXR VQA DATASET SUMMARY                      ║
-╠══════════════════════════════════════════════════════════════════════╣
-║                                                                        ║
-║  📁 MIMIC-CXR-JPG Dataset                                             ║
-║  ├─ Total Images:         {self.report.total_images:>12,}                            ║
-║  ├─ Total Studies:        {self.report.total_studies:>12,}                            ║
-║  ├─ Total Patients:       {self.report.total_patients:>12,}                            ║
-║  └─ CheXpert Labeled:     {self.report.chexpert_studies_labeled:>12,}                            ║
-║                                                                        ║
-║  📊 Train/Val/Test Split                                              ║
-║  ├─ Train:                {self.report.train_samples:>12,}                            ║
-║  ├─ Validate:             {self.report.val_samples:>12,}                            ║
-║  └─ Test:                 {self.report.test_samples:>12,}                            ║
-║                                                                        ║
-║  🔗 MIMIC-Ext-CXR-QBA Dataset                                         ║
-║  ├─ Total QA Pairs:       {self.report.total_qa_pairs:>12,}                            ║
-║  ├─ Total Scene Graphs:   {self.report.total_scene_graphs:>12,}                            ║
-║  └─ Avg Obs/Graph:        {self.report.avg_observations_per_graph:>12.2f}                            ║
-║                                                                        ║
-║  ✓ Status: {'READY FOR TRAINING' if self.report.is_ready else 'NOT READY - Check Issues':^20}                            ║
-║                                                                        ║
-╚══════════════════════════════════════════════════════════════════════╝
+        # Left panel: MIMIC-CXR-JPG stats
+        ax1 = axes[0]
+        ax1.axis('off')
+        ax1.set_title('MIMIC-CXR-JPG Dataset', fontsize=14, fontweight='bold', pad=20)
+        
+        cxr_text = f"""
+    IMAGES & STUDIES
+    ================
+    Total Images:      {self.report.total_images:>12,}
+    Total Studies:     {self.report.total_studies:>12,}
+    Total Patients:    {self.report.total_patients:>12,}
+    CheXpert Labeled:  {self.report.chexpert_studies_labeled:>12,}
+    
+    DATA SPLITS
+    ================
+    Train:             {self.report.train_samples:>12,}
+    Validate:          {self.report.val_samples:>12,}
+    Test:              {self.report.test_samples:>12,}
+    
+    IMAGE DIMENSIONS
+    ================
+    Height: {self.report.image_dimension_stats.get('height_mean', 0):.0f} +/- {self.report.image_dimension_stats.get('height_std', 0):.0f}
+    Width:  {self.report.image_dimension_stats.get('width_mean', 0):.0f} +/- {self.report.image_dimension_stats.get('width_std', 0):.0f}
 """
-        ax.text(0.5, 0.5, summary_text, transform=ax.transAxes, fontsize=10,
-               verticalalignment='center', horizontalalignment='center',
-               fontfamily='monospace', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+        ax1.text(0.1, 0.95, cxr_text, transform=ax1.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#e8f4fd', alpha=0.9))
         
+        # Middle panel: MIMIC-Ext-CXR-QBA stats
+        ax2 = axes[1]
+        ax2.axis('off')
+        ax2.set_title('MIMIC-Ext-CXR-QBA Dataset', fontsize=14, fontweight='bold', pad=20)
+        
+        qba_text = f"""
+    QA & SCENE GRAPHS
+    ==================
+    Total QA Pairs:    {self.report.total_qa_pairs:>12,}
+    Scene Graphs:      {self.report.total_scene_graphs:>12,}
+    Avg Obs/Graph:     {self.report.avg_observations_per_graph:>12.2f}
+    BBox Coverage:     {self.report.bbox_coverage*100:>11.1f}%
+    
+    QUESTION TYPES
+    ==================
+    Total Types:       {len(self.report.question_type_distribution):>12,}
+    
+    FINDING POLARITY
+    ==================
+    Positive:          {self.report.polarity_distribution.get('positive', 0):>12,}
+    Negative:          {self.report.polarity_distribution.get('negative', 0):>12,}
+    Neutral:           {self.report.polarity_distribution.get('neutral', 0):>12,}
+"""
+        ax2.text(0.1, 0.95, qba_text, transform=ax2.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#f4fde8', alpha=0.9))
+        
+        # Right panel: Cross-dataset and status
+        ax3 = axes[2]
+        ax3.axis('off')
+        ax3.set_title('Cross-Dataset & Status', fontsize=14, fontweight='bold', pad=20)
+        
+        status_color = '#d4edda' if self.report.is_ready else '#f8d7da'
+        status_text = 'READY FOR TRAINING' if self.report.is_ready else 'NOT READY'
+        
+        cross_text = f"""
+    DATASET ALIGNMENT
+    ==================
+    Matched Studies:   {self.report.matched_studies:>12,}
+    CXR-JPG Only:      {self.report.unmatched_studies_cxr:>12,}
+    QBA Only:          {self.report.unmatched_studies_qba:>12,}
+    
+    METADATA FILES
+    ==================
+    Files Analyzed:    {len(self.report.metadata_csv_info):>12,}
+    
+    ISSUES & WARNINGS
+    ==================
+    Critical Issues:   {len(self.report.issues):>12,}
+    Warnings:          {len(self.report.warnings):>12,}
+    
+    ==================
+    STATUS: {status_text}
+    ==================
+"""
+        ax3.text(0.1, 0.95, cross_text, transform=ax3.transAxes, fontsize=10,
+                verticalalignment='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor=status_color, alpha=0.9))
+        
+        plt.suptitle('MIMIC-CXR VQA Dataset Summary', fontsize=16, fontweight='bold', y=1.02)
         plt.tight_layout()
         plot_path = self.output_dir / 'dataset_summary.png'
         plt.savefig(plot_path, dpi=150, bbox_inches='tight', facecolor='white')
         plt.close()
-        logger.info(f"📊 Dataset summary saved to: {plot_path}")
+        logger.info(f"[PLOT] Dataset summary saved to: {plot_path}")
+        
+        # ============ Plot 5: Comprehensive Statistics Dashboard ============
+        self._generate_statistics_dashboard()
+
+    def _generate_statistics_dashboard(self):
+        """Generate a comprehensive statistics dashboard."""
+        if not PLOTTING_AVAILABLE:
+            return
+        
+        fig = plt.figure(figsize=(20, 16))
+        gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.3, wspace=0.3)
+        
+        # Row 1: CheXpert heatmap
+        ax1 = fig.add_subplot(gs[0, :2])
+        if self.report.chexpert_label_counts:
+            labels = list(self.report.chexpert_label_counts.keys())
+            data = []
+            for label in labels:
+                counts = self.report.chexpert_label_counts[label]
+                total = sum(counts.values())
+                row = [
+                    counts.get('positive', 0) / total * 100 if total > 0 else 0,
+                    counts.get('negative', 0) / total * 100 if total > 0 else 0,
+                    counts.get('uncertain', 0) / total * 100 if total > 0 else 0,
+                    counts.get('missing', 0) / total * 100 if total > 0 else 0,
+                ]
+                data.append(row)
+            
+            data_arr = np.array(data)
+            im = ax1.imshow(data_arr, aspect='auto', cmap='RdYlGn_r')
+            ax1.set_yticks(range(len(labels)))
+            ax1.set_yticklabels(labels, fontsize=8)
+            ax1.set_xticks(range(4))
+            ax1.set_xticklabels(['Positive', 'Negative', 'Uncertain', 'Missing'], fontsize=9)
+            ax1.set_title('CheXpert Label Distribution (%)', fontweight='bold')
+            plt.colorbar(im, ax=ax1, label='Percentage')
+        
+        # Row 1: View position pie
+        ax2 = fig.add_subplot(gs[0, 2])
+        if self.report.view_position_distribution:
+            views = list(self.report.view_position_distribution.keys())[:5]
+            counts = [self.report.view_position_distribution[v] for v in views]
+            colors = plt.cm.Set2(np.linspace(0, 1, len(views)))
+            ax2.pie(counts, labels=views, autopct='%1.1f%%', colors=colors, textprops={'fontsize': 8})
+            ax2.set_title('View Positions', fontweight='bold')
+        
+        # Row 1: Procedure distribution
+        ax3 = fig.add_subplot(gs[0, 3])
+        if self.report.procedure_distribution:
+            procs = list(self.report.procedure_distribution.keys())[:5]
+            counts = [self.report.procedure_distribution[p] for p in procs]
+            short_procs = [p[:25] + '...' if len(p) > 25 else p for p in procs]
+            colors = plt.cm.Pastel1(np.linspace(0, 1, len(procs)))
+            ax3.barh(short_procs, counts, color=colors)
+            ax3.set_xlabel('Count')
+            ax3.set_title('Procedures', fontweight='bold')
+            ax3.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        
+        # Row 2: Question types
+        ax4 = fig.add_subplot(gs[1, :2])
+        if self.report.question_type_distribution:
+            types = list(self.report.question_type_distribution.keys())[:12]
+            counts = [self.report.question_type_distribution[t] for t in types]
+            colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(types)))
+            bars = ax4.barh(types, counts, color=colors)
+            ax4.set_xlabel('Count')
+            ax4.set_title('Question Type Distribution (Top 12)', fontweight='bold')
+            ax4.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        
+        # Row 2: Polarity
+        ax5 = fig.add_subplot(gs[1, 2])
+        if self.report.polarity_distribution:
+            labels = list(self.report.polarity_distribution.keys())
+            sizes = list(self.report.polarity_distribution.values())
+            colors = {'positive': '#e74c3c', 'negative': '#2ecc71', 'neutral': '#95a5a6'}
+            pie_colors = [colors.get(l, '#3498db') for l in labels]
+            ax5.pie(sizes, labels=labels, autopct='%1.1f%%', colors=pie_colors, 
+                   explode=[0.02]*len(labels), textprops={'fontsize': 9})
+            ax5.set_title('Finding Polarity', fontweight='bold')
+        
+        # Row 2: Anatomical regions
+        ax6 = fig.add_subplot(gs[1, 3])
+        if self.report.region_distribution:
+            regions = list(self.report.region_distribution.keys())
+            counts = list(self.report.region_distribution.values())
+            colors = plt.cm.Set3(np.linspace(0, 1, len(regions)))
+            ax6.bar(regions, counts, color=colors)
+            ax6.set_ylabel('Count')
+            ax6.set_title('Anatomical Regions', fontweight='bold')
+            ax6.tick_params(axis='x', rotation=45)
+            ax6.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+        
+        # Row 3: Split distribution
+        ax7 = fig.add_subplot(gs[2, 0])
+        splits = ['Train', 'Validate', 'Test']
+        split_counts = [self.report.train_samples, self.report.val_samples, self.report.test_samples]
+        colors = ['#3498db', '#9b59b6', '#e74c3c']
+        ax7.bar(splits, split_counts, color=colors)
+        ax7.set_ylabel('Count')
+        ax7.set_title('Data Splits', fontweight='bold')
+        ax7.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+        for i, (split, count) in enumerate(zip(splits, split_counts)):
+            ax7.text(i, count + max(split_counts)*0.02, f'{count:,}', ha='center', fontsize=8)
+        
+        # Row 3: Answer types
+        ax8 = fig.add_subplot(gs[2, 1])
+        if self.report.answer_type_distribution:
+            types = list(self.report.answer_type_distribution.keys())
+            counts = list(self.report.answer_type_distribution.values())
+            colors = plt.cm.Paired(np.linspace(0, 1, len(types)))
+            ax8.bar(types, counts, color=colors)
+            ax8.set_ylabel('Count')
+            ax8.set_title('Answer Types', fontweight='bold')
+            ax8.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+        
+        # Row 3: Scene graph quality metrics
+        ax9 = fig.add_subplot(gs[2, 2:])
+        metrics = ['Avg Obs/Graph', 'Avg Regions/Obs', 'BBox Coverage (%)']
+        values = [
+            self.report.avg_observations_per_graph,
+            self.report.avg_regions_per_observation,
+            self.report.bbox_coverage * 100
+        ]
+        colors = ['#1abc9c', '#3498db', '#9b59b6']
+        bars = ax9.bar(metrics, values, color=colors)
+        ax9.set_ylabel('Value')
+        ax9.set_title('Scene Graph Quality Metrics', fontweight='bold')
+        for bar, val in zip(bars, values):
+            ax9.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5, 
+                    f'{val:.2f}', ha='center', fontsize=10)
+        
+        plt.suptitle('MIMIC-CXR VQA Comprehensive Statistics Dashboard', 
+                    fontsize=16, fontweight='bold', y=1.01)
+        
+        plot_path = self.output_dir / 'statistics_dashboard.png'
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight', facecolor='white')
+        plt.close()
+        logger.info(f"[PLOT] Statistics dashboard saved to: {plot_path}")
 
     def _get_image_path(self, patient_id: str, study_id: str) -> Optional[Path]:
         """
@@ -1528,20 +2213,20 @@ class DataAnalyzer:
                 ax2 = axes[1]
                 ax2.axis('off')
                 
-                text_content = f"📊 Scene Graph Summary\n{'='*40}\n"
+                text_content = f"[SCENE GRAPH SUMMARY]\n{'='*40}\n"
                 text_content += f"Observations: {len(observations_data)}\n"
                 text_content += f"Total bboxes: {len(all_bboxes)}\n\n"
                 
-                text_content += f"🔬 Top Observations:\n{'-'*40}\n"
+                text_content += f"[TOP OBSERVATIONS]\n{'-'*40}\n"
                 for i, obs in enumerate(observations_data[:5], 1):
-                    pos_marker = "🔴" if obs['positiveness'] == 'pos' else "🟢" if obs['positiveness'] == 'neg' else "🟡"
+                    pos_marker = "[+]" if obs['positiveness'] == 'pos' else "[-]" if obs['positiveness'] == 'neg' else "[?]"
                     text_content += f"{i}. {pos_marker} {obs['name'][:40]}\n"
                     if obs['entities']:
                         text_content += f"   Entities: {', '.join(obs['entities'][:3])}\n"
                     if obs['regions']:
                         text_content += f"   Regions: {', '.join(obs['regions'][:3])}\n"
                 
-                text_content += f"\n❓ Sample Questions:\n{'-'*40}\n"
+                text_content += f"\n[SAMPLE QUESTIONS]\n{'-'*40}\n"
                 for i, q in enumerate(questions, 1):
                     q_text = q.get('question', '')[:60]
                     q_type = q.get('question_type', 'unknown')
@@ -1627,11 +2312,11 @@ class DataAnalyzer:
                 # Panel 1: Observation summary table
                 ax1 = fig.add_subplot(gs[0, 0])
                 ax1.axis('off')
-                ax1.set_title(f"📋 Observations ({len(observations)})", fontsize=12, fontweight='bold')
+                ax1.set_title(f"[OBSERVATIONS] ({len(observations)})", fontsize=12, fontweight='bold')
                 
                 obs_text = ""
                 for i, (obs_id, obs) in enumerate(list(observations.items())[:8]):
-                    pos_marker = "🔴" if obs.get('positiveness') == 'pos' else "🟢" if obs.get('positiveness') == 'neg' else "🟡"
+                    pos_marker = "[+]" if obs.get('positiveness') == 'pos' else "[-]" if obs.get('positiveness') == 'neg' else "[?]"
                     name = obs.get('name', 'unknown')[:35]
                     entities = ', '.join(obs.get('obs_entities', [])[:2])
                     obs_text += f"{pos_marker} {obs_id}: {name}\n"
@@ -1645,7 +2330,7 @@ class DataAnalyzer:
                 # Panel 2: Regions summary
                 ax2 = fig.add_subplot(gs[0, 1])
                 ax2.axis('off')
-                ax2.set_title(f"🫁 Regions ({len(regions)})", fontsize=12, fontweight='bold')
+                ax2.set_title(f"[REGIONS] ({len(regions)})", fontsize=12, fontweight='bold')
                 
                 region_text = "Region Name             | Laterality\n" + "-" * 40 + "\n"
                 for region_name, region_data in list(regions.items())[:12]:
@@ -1659,7 +2344,7 @@ class DataAnalyzer:
                 # Panel 3: Report sentences
                 ax3 = fig.add_subplot(gs[0, 2])
                 ax3.axis('off')
-                ax3.set_title(f"📝 Report Sentences ({len(sentences)})", fontsize=12, fontweight='bold')
+                ax3.set_title(f"[REPORT SENTENCES] ({len(sentences)})", fontsize=12, fontweight='bold')
                 
                 sent_text = ""
                 for sent_id, sent in list(sentences.items())[:6]:
@@ -1707,7 +2392,7 @@ class DataAnalyzer:
                 # Panel 6: Indication/Clinical info
                 ax6 = fig.add_subplot(gs[1, 2])
                 ax6.axis('off')
-                ax6.set_title("🏥 Clinical Context", fontsize=12, fontweight='bold')
+                ax6.set_title("[CLINICAL CONTEXT]", fontsize=12, fontweight='bold')
                 
                 indication = sg.get('indication', {})
                 clinical_text = ""
