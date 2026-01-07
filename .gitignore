@@ -3,7 +3,7 @@ github
 slurms/**/*.log
 
 .ipynb_checkpoints
-
+analysis_output/
 *.DS_Store
 ftpconfigs
 .ftp*

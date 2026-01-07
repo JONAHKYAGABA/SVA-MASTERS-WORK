@@ -39,14 +39,26 @@ import traceback
 import numpy as np
 import pandas as pd
 
+# Suppress noisy warnings
+warnings.filterwarnings('ignore', message='.*categorical units.*')
+warnings.filterwarnings('ignore', message='.*parsable as floats.*')
+warnings.filterwarnings('ignore', category=UserWarning, module='matplotlib')
+
 # Optional visualization imports
 try:
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
     import matplotlib.pyplot as plt
     import matplotlib.patches as mpatches
     from matplotlib.patches import FancyBboxPatch, ConnectionPatch
     import matplotlib.gridspec as gridspec
     import seaborn as sns
     sns.set_style("whitegrid")
+    
+    # Suppress matplotlib logging
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    logging.getLogger('matplotlib.category').setLevel(logging.ERROR)
+    
     PLOTTING_AVAILABLE = True
 except ImportError:
     PLOTTING_AVAILABLE = False
@@ -663,8 +675,8 @@ class DataAnalyzer:
         # Show key distributions for important columns
         self._show_key_distributions(filename, df)
         
-        # Generate column visualizations for this file
-        self._visualize_metadata_columns(filename, df)
+        # Generate HOLISTIC CSV visualization (not per-column)
+        self._create_csv_overview_visualization(filename, df, description)
     
     def _analyze_single_column(self, df: pd.DataFrame, col: str) -> Dict[str, Any]:
         """Analyze a single column comprehensively based on its data type."""
@@ -790,204 +802,1178 @@ class DataAnalyzer:
         
         return analysis
     
-    def _visualize_metadata_columns(self, filename: str, df: pd.DataFrame):
-        """Generate visualizations for metadata columns based on their types."""
+    def _create_csv_overview_visualization(self, filename: str, df: pd.DataFrame, description: str):
+        """Create ONE holistic visualization per CSV file showing all key comparisons.
+        
+        This creates a single, meaningful visualization that shows the entire dataset
+        in context rather than fragmented per-column plots.
+        """
         if not PLOTTING_AVAILABLE:
             return
         
         try:
-            # Create output directory for this file
-            viz_dir = self.output_dir / 'column_analysis' / filename.replace('.', '_')
+            viz_dir = self.output_dir / 'csv_overviews'
             viz_dir.mkdir(parents=True, exist_ok=True)
             
-            # Separate columns by type for visualization
-            bool_cols = [c for c in df.columns if df[c].dtype == 'bool']
-            int_cols = [c for c in df.columns if df[c].dtype in ['int64', 'int32', 'int16', 'int8']]
-            float_cols = [c for c in df.columns if df[c].dtype in ['float64', 'float32', 'float16']]
-            str_cols = [c for c in df.columns if df[c].dtype == 'object' or str(df[c].dtype).startswith('str')]
+            filename_lower = filename.lower()
+            safe_name = filename.replace('.', '_').replace('/', '_')[:40]
+            output_path = viz_dir / f'{safe_name}_overview.png'
             
-            # Limit to avoid too many plots
-            max_plots_per_type = 6
-        
-            # ===== Boolean Columns =====
-            if bool_cols:
-                n_cols = min(len(bool_cols), max_plots_per_type)
-                n_plot_cols = min(4, n_cols)
-                n_rows = (n_cols + n_plot_cols - 1) // n_plot_cols
-                
-                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(4*n_plot_cols, 4*n_rows))
-                
-                # Ensure axes is always a flat list
-                if n_rows == 1 and n_plot_cols == 1:
-                    axes_flat = [axes]
-                elif n_rows == 1 or n_plot_cols == 1:
-                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
-                else:
-                    axes_flat = axes.flatten().tolist()
-                
-                for i, col in enumerate(bool_cols[:n_cols]):
-                    ax = axes_flat[i]
-                    counts = df[col].value_counts()
-                    colors = ['#2ecc71', '#e74c3c']
-                    labels = [str(idx) for idx in counts.index]
-                    ax.pie(counts.values, labels=labels, autopct='%1.1f%%', 
-                          colors=colors[:len(counts)], startangle=90)
-                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
-                
-                # Hide empty subplots
-                for j in range(len(bool_cols[:n_cols]), len(axes_flat)):
-                    axes_flat[j].axis('off')
-                
-                plt.suptitle(f'{filename}: Boolean Columns', fontweight='bold')
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'boolean_columns.png', dpi=120, bbox_inches='tight')
-                plt.close()
+            # Route to specialized holistic visualizations
+            if 'patient' in filename_lower:
+                self._create_patient_overview(df, output_path, description)
+            elif 'study' in filename_lower:
+                self._create_study_overview(df, output_path, description)
+            elif 'question' in filename_lower:
+                self._create_question_overview(df, output_path, description)
+            elif 'answer' in filename_lower:
+                self._create_answer_overview(df, output_path, description)
+            elif 'image' in filename_lower:
+                self._create_image_overview(df, output_path, description)
+            elif 'chexpert' in filename_lower:
+                self._create_chexpert_overview(df, output_path, description)
+            elif 'split' in filename_lower:
+                self._create_split_overview(df, output_path, description)
+            elif 'metadata' in filename_lower and 'mimic-cxr' in filename_lower:
+                self._create_mimic_metadata_overview(df, output_path, description)
+            else:
+                self._create_generic_overview(filename, df, output_path, description)
             
-            # ===== Integer Columns =====
-            if int_cols:
-                n_cols = min(len(int_cols), max_plots_per_type)
-                n_rows = (n_cols + 2) // 3  # 3 columns per row
-                n_plot_cols = min(3, n_cols)
-                
-                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(5*n_plot_cols, 4*n_rows))
-                
-                # Ensure axes is always a flat list
-                if n_rows == 1 and n_plot_cols == 1:
-                    axes_flat = [axes]
-                elif n_rows == 1 or n_plot_cols == 1:
-                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
-                else:
-                    axes_flat = axes.flatten().tolist()
-                
-                for i, col in enumerate(int_cols[:n_cols]):
-                    ax = axes_flat[i]
-                    col_data = df[col].dropna()
-                    n_unique = col_data.nunique()
-                    
-                    if n_unique <= 15:
-                        # Bar chart for low cardinality
-                        value_counts = col_data.value_counts().sort_index()
-                        colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(value_counts)))
-                        ax.bar(value_counts.index.astype(str), value_counts.values, color=colors)
-                        ax.set_xlabel('Value')
-                        ax.set_ylabel('Count')
-                        ax.tick_params(axis='x', rotation=45)
-                    else:
-                        # Histogram for high cardinality
-                        ax.hist(col_data.values, bins=min(50, n_unique), color='steelblue', edgecolor='white', alpha=0.8)
-                        ax.set_xlabel('Value')
-                        ax.set_ylabel('Frequency')
-                        
-                        # Add statistics
-                        mean_val = col_data.mean()
-                        median_val = col_data.median()
-                        ax.axvline(mean_val, color='red', linestyle='--', linewidth=1.5, label=f'Mean: {mean_val:.1f}')
-                        ax.axvline(median_val, color='orange', linestyle=':', linewidth=1.5, label=f'Median: {median_val:.1f}')
-                        ax.legend(fontsize=7)
-                    
-                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
-                    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-                
-                # Hide empty subplots
-                for j in range(len(int_cols[:n_cols]), len(axes_flat)):
-                    axes_flat[j].axis('off')
-                
-                plt.suptitle(f'{filename}: Integer Columns', fontweight='bold')
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'integer_columns.png', dpi=120, bbox_inches='tight')
-                plt.close()
-            
-            # ===== Float Columns =====
-            if float_cols:
-                n_cols = min(len(float_cols), max_plots_per_type)
-                n_rows = (n_cols + 2) // 3  # 3 columns per row
-                n_plot_cols = min(3, n_cols)
-                
-                fig, axes = plt.subplots(n_rows, n_plot_cols, figsize=(5*n_plot_cols, 4*n_rows))
-                
-                # Ensure axes is always a flat list
-                if n_rows == 1 and n_plot_cols == 1:
-                    axes_flat = [axes]
-                elif n_rows == 1 or n_plot_cols == 1:
-                    axes_flat = list(axes) if hasattr(axes, '__iter__') else [axes]
-                else:
-                    axes_flat = axes.flatten().tolist()
-                
-                for i, col in enumerate(float_cols[:n_cols]):
-                    ax = axes_flat[i]
-                    col_data = df[col].dropna()
-                    
-                    # Histogram with KDE-like appearance
-                    ax.hist(col_data.values, bins=50, color='teal', edgecolor='white', alpha=0.7)
-                    
-                    # Add statistics box
-                    stats_text = f"Mean: {col_data.mean():.3f}\nStd: {col_data.std():.3f}\nMin: {col_data.min():.3f}\nMax: {col_data.max():.3f}"
-                    ax.text(0.95, 0.95, stats_text, transform=ax.transAxes, fontsize=7,
-                           verticalalignment='top', horizontalalignment='right',
-                           bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-                    
-                    ax.set_xlabel('Value')
-                    ax.set_ylabel('Frequency')
-                    ax.set_title(col.split('.')[-1][:25], fontsize=9)
-                    ax.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
-                
-                # Hide empty subplots
-                for j in range(len(float_cols[:n_cols]), len(axes_flat)):
-                    axes_flat[j].axis('off')
-                
-                plt.suptitle(f'{filename}: Float Columns', fontweight='bold')
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'float_columns.png', dpi=120, bbox_inches='tight')
-                plt.close()
-            
-            # ===== String/Categorical Columns =====
-            # Only visualize low-to-medium cardinality string columns
-            str_cols_viz = [c for c in str_cols if df[c].nunique() <= 30]
-            
-            if str_cols_viz:
-                n_cols = min(len(str_cols_viz), max_plots_per_type)
-                
-                fig, axes = plt.subplots(n_cols, 1, figsize=(12, max(4, 3*n_cols)))
-                
-                # Ensure axes is always a list
-                if n_cols == 1:
-                    axes_flat = [axes]
-                else:
-                    axes_flat = list(axes)
-                
-                for i, col in enumerate(str_cols_viz[:n_cols]):
-                    ax = axes_flat[i]
-                    value_counts = df[col].value_counts().head(15)
-                    
-                    # Truncate long labels
-                    labels = [str(v)[:30] + ('...' if len(str(v)) > 30 else '') for v in value_counts.index]
-                    colors = plt.cm.Paired(np.linspace(0, 1, len(value_counts)))
-                    
-                    bars = ax.barh(labels, value_counts.values, color=colors)
-                    ax.set_xlabel('Count')
-                    ax.set_title(f'{col} ({df[col].nunique()} unique values)', fontsize=10, fontweight='bold')
-                    ax.invert_yaxis()
-                    ax.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
-                    
-                    # Add percentage labels
-                    total = len(df)
-                    for bar, count in zip(bars, value_counts.values):
-                        pct = count / total * 100
-                        ax.text(bar.get_width() + total*0.01, bar.get_y() + bar.get_height()/2,
-                               f'{pct:.1f}%', va='center', fontsize=8)
-                
-                plt.suptitle(f'{filename}: Categorical Columns', fontweight='bold', y=1.01)
-                plt.tight_layout()
-                plt.savefig(viz_dir / 'categorical_columns.png', dpi=120, bbox_inches='tight')
-                plt.close()
-            
-            # ===== Summary Overview =====
-            self._create_column_summary_plot(filename, df, viz_dir)
-            
-            logger.info(f"  [VIZ] Column analysis plots saved to: {viz_dir}")
+            logger.info(f"  [VIZ] CSV overview saved: {output_path.name}")
             
         except Exception as e:
-            logger.warning(f"  [VIZ] Error generating column visualizations for {filename}: {e}")
+            logger.warning(f"  [VIZ] Error creating CSV overview for {filename}: {e}")
+    
+    def _create_patient_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create meaningful patient-level insights visualization."""
+        fig = plt.figure(figsize=(18, 12))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+        
+        # 1. Data Split Distribution (Critical for ML)
+        ax1 = fig.add_subplot(gs[0, 0])
+        if 'split' in df.columns:
+            split_counts = df['split'].value_counts()
+            colors = {'train': '#27ae60', 'validate': '#3498db', 'test': '#e74c3c'}
+            bar_colors = [colors.get(s, '#95a5a6') for s in split_counts.index]
+            bars = ax1.bar(split_counts.index, split_counts.values, color=bar_colors, edgecolor='white', linewidth=2)
+            ax1.set_ylabel('Number of Patients', fontsize=11)
+            ax1.set_title('Train / Validation / Test Split\n(Patient-Level)', fontsize=12, fontweight='bold')
+            
+            # Add count and percentage labels
+            total = split_counts.sum()
+            for bar, count in zip(bars, split_counts.values):
+                pct = count / total * 100
+                ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + total*0.01, 
+                        f'{count:,}\n({pct:.1f}%)', ha='center', va='bottom', fontsize=10, fontweight='bold')
+            ax1.set_ylim(0, max(split_counts.values) * 1.15)
+        else:
+            ax1.text(0.5, 0.5, 'No split column', ha='center', va='center', fontsize=12)
+            ax1.set_title('Data Split', fontsize=12, fontweight='bold')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # 2. Studies per Patient Distribution (Important for understanding data)
+        ax2 = fig.add_subplot(gs[0, 1])
+        studies_col = [c for c in df.columns if 'total_studies' in c.lower() or 'study_count' in c.lower()]
+        if studies_col:
+            col = studies_col[0]
+            study_data = df[col].dropna()
+            
+            # Create bins for cleaner histogram
+            max_studies = min(study_data.max(), 30)  # Cap at 30 for readability
+            bins = list(range(0, int(max_studies) + 2))
+            
+            ax2.hist(study_data.clip(upper=max_studies), bins=bins, color='#3498db', 
+                    edgecolor='white', alpha=0.8)
+            ax2.axvline(study_data.median(), color='#e74c3c', linestyle='--', linewidth=2, 
+                       label=f'Median: {study_data.median():.0f}')
+            ax2.axvline(study_data.mean(), color='#f39c12', linestyle=':', linewidth=2,
+                       label=f'Mean: {study_data.mean():.1f}')
+            ax2.set_xlabel('Number of Studies per Patient', fontsize=11)
+            ax2.set_ylabel('Number of Patients', fontsize=11)
+            ax2.set_title('Studies per Patient Distribution\n(How many X-rays per patient?)', 
+                         fontsize=12, fontweight='bold')
+            ax2.legend(fontsize=9)
+            
+            # Add insight text
+            single_study = (study_data == 1).sum()
+            multi_study = (study_data > 1).sum()
+            insight = f"Single study: {single_study:,} ({single_study/len(study_data)*100:.1f}%)\n"
+            insight += f"Multiple studies: {multi_study:,} ({multi_study/len(study_data)*100:.1f}%)"
+            ax2.text(0.95, 0.95, insight, transform=ax2.transAxes, fontsize=9,
+                    va='top', ha='right', bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+        else:
+            ax2.text(0.5, 0.5, 'No study count column', ha='center', va='center', fontsize=12)
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # 3. Key Statistics Summary
+        ax3 = fig.add_subplot(gs[0, 2])
+        ax3.axis('off')
+        
+        stats_text = "PATIENT DATASET SUMMARY\n" + "=" * 35 + "\n\n"
+        stats_text += f"Total Patients: {len(df):,}\n\n"
+        
+        if 'split' in df.columns:
+            for split in ['train', 'validate', 'test']:
+                count = (df['split'] == split).sum()
+                stats_text += f"  {split.title()}: {count:,}\n"
+        
+        stats_text += "\n"
+        if studies_col:
+            col = studies_col[0]
+            stats_text += f"Studies per Patient:\n"
+            stats_text += f"  Min: {df[col].min():.0f}\n"
+            stats_text += f"  Max: {df[col].max():.0f}\n"
+            stats_text += f"  Mean: {df[col].mean():.2f}\n"
+            stats_text += f"  Median: {df[col].median():.0f}\n"
+        
+        ax3.text(0.1, 0.9, stats_text, transform=ax3.transAxes, fontsize=11,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax3.set_title('Key Statistics', fontsize=12, fontweight='bold')
+        
+        # 4. Data Quality Indicators
+        ax4 = fig.add_subplot(gs[1, :2])
+        
+        # Calculate quality metrics for each column
+        quality_data = []
+        for col in df.columns:
+            null_pct = df[col].isnull().sum() / len(df) * 100
+            unique_ratio = df[col].nunique() / len(df)
+            quality_data.append({
+                'column': col.split('.')[-1][:20],
+                'null_pct': null_pct,
+                'unique_ratio': unique_ratio
+            })
+        
+        quality_df = pd.DataFrame(quality_data)
+        
+        x = np.arange(len(quality_df))
+        width = 0.6
+        
+        # Color by null percentage
+        colors = ['#27ae60' if p < 1 else '#f39c12' if p < 10 else '#e74c3c' for p in quality_df['null_pct']]
+        bars = ax4.bar(x, quality_df['null_pct'], width, color=colors, edgecolor='white')
+        
+        ax4.set_ylabel('Missing Values (%)', fontsize=11)
+        ax4.set_title('Data Quality: Missing Values by Column\n(Green=<1%, Yellow=<10%, Red=>10%)', 
+                     fontsize=12, fontweight='bold')
+        ax4.set_xticks(x)
+        ax4.set_xticklabels(quality_df['column'], rotation=45, ha='right', fontsize=9)
+        ax4.axhline(1, color='green', linestyle='--', alpha=0.5)
+        ax4.axhline(10, color='orange', linestyle='--', alpha=0.5)
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+        
+        # 5. Interpretation/Insights Panel
+        ax5 = fig.add_subplot(gs[1, 2])
+        ax5.axis('off')
+        
+        insights = "KEY INSIGHTS\n" + "=" * 30 + "\n\n"
+        
+        # Generate insights based on data
+        if 'split' in df.columns:
+            train_pct = (df['split'] == 'train').sum() / len(df) * 100
+            if train_pct > 90:
+                insights += "[!] Train set is >90% of data\n    Consider if this is intentional\n\n"
+            else:
+                insights += "[OK] Reasonable train/test split\n\n"
+        
+        if studies_col:
+            col = studies_col[0]
+            if df[col].max() > 50:
+                insights += "[!] Some patients have 50+ studies\n    May need handling for imbalance\n\n"
+            if df[col].median() == 1:
+                insights += "[INFO] Most patients have single study\n    Limited longitudinal data\n\n"
+        
+        # Check for data quality issues
+        high_null_cols = [c for c in df.columns if df[c].isnull().sum() / len(df) > 0.1]
+        if high_null_cols:
+            insights += f"[WARN] {len(high_null_cols)} columns have >10% nulls\n\n"
+        else:
+            insights += "[OK] Good data completeness\n\n"
+        
+        ax5.text(0.1, 0.9, insights, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax5.set_title('Interpretation', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('Patient Metadata Analysis', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_study_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create meaningful study-level insights visualization."""
+        fig = plt.figure(figsize=(20, 14))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.3)
+        
+        # 1. Quality Rating Distribution
+        ax1 = fig.add_subplot(gs[0, 0])
+        quality_cols = [c for c in df.columns if 'quality' in c.lower() and 'rating' in c.lower()]
+        if quality_cols:
+            col = quality_cols[0]
+            value_counts = df[col].value_counts().sort_index()
+            
+            # Color by quality level
+            colors = plt.cm.RdYlGn(np.linspace(0.2, 0.9, len(value_counts)))
+            bars = ax1.bar(value_counts.index.astype(str), value_counts.values, color=colors, edgecolor='white')
+            ax1.set_xlabel('Quality Rating', fontsize=11)
+            ax1.set_ylabel('Number of Studies', fontsize=11)
+            ax1.set_title('Study Quality Distribution\n(Higher = Better)', fontsize=12, fontweight='bold')
+            ax1.tick_params(axis='x', rotation=45)
+            
+            # Add percentage labels
+            total = value_counts.sum()
+            for bar, count in zip(bars, value_counts.values):
+                if count / total > 0.05:  # Only label if >5%
+                    ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height(), 
+                            f'{count/total*100:.1f}%', ha='center', va='bottom', fontsize=9)
+        else:
+            ax1.text(0.5, 0.5, 'No quality rating column', ha='center', va='center')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # 2. Observations per Study
+        ax2 = fig.add_subplot(gs[0, 1])
+        obs_cols = [c for c in df.columns if 'observation' in c.lower() and 'count' in c.lower()]
+        if obs_cols:
+            col = obs_cols[0]
+            obs_data = df[col].dropna()
+            
+            ax2.hist(obs_data.clip(upper=30), bins=30, color='#9b59b6', edgecolor='white', alpha=0.8)
+            ax2.axvline(obs_data.median(), color='#e74c3c', linestyle='--', linewidth=2,
+                       label=f'Median: {obs_data.median():.0f}')
+            ax2.set_xlabel('Observations per Study', fontsize=11)
+            ax2.set_ylabel('Frequency', fontsize=11)
+            ax2.set_title('Clinical Observations per Study\n(Scene Graph Complexity)', fontsize=12, fontweight='bold')
+            ax2.legend()
+        else:
+            ax2.text(0.5, 0.5, 'No observation count column', ha='center', va='center')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # 3. QA Pairs per Study
+        ax3 = fig.add_subplot(gs[0, 2])
+        qa_cols = [c for c in df.columns if 'qa' in c.lower() and 'count' in c.lower()]
+        if qa_cols:
+            col = qa_cols[0]
+            qa_data = df[col].dropna()
+            
+            ax3.hist(qa_data.clip(upper=200), bins=50, color='#1abc9c', edgecolor='white', alpha=0.8)
+            ax3.axvline(qa_data.median(), color='#e74c3c', linestyle='--', linewidth=2,
+                       label=f'Median: {qa_data.median():.0f}')
+            ax3.set_xlabel('QA Pairs per Study', fontsize=11)
+            ax3.set_ylabel('Frequency', fontsize=11)
+            ax3.set_title('VQA Pairs per Study\n(Training Data Density)', fontsize=12, fontweight='bold')
+            ax3.legend()
+        else:
+            ax3.text(0.5, 0.5, 'No QA count column', ha='center', va='center')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        
+        # 4. Image Count per Study
+        ax4 = fig.add_subplot(gs[1, 0])
+        img_cols = [c for c in df.columns if 'image' in c.lower() and 'count' in c.lower()]
+        if img_cols:
+            col = img_cols[0]
+            img_data = df[col].value_counts().sort_index()
+            
+            colors = plt.cm.Blues(np.linspace(0.3, 0.9, len(img_data)))
+            bars = ax4.bar(img_data.index.astype(str), img_data.values, color=colors, edgecolor='white')
+            ax4.set_xlabel('Number of Images', fontsize=11)
+            ax4.set_ylabel('Number of Studies', fontsize=11)
+            ax4.set_title('Images per Study\n(Multi-view Studies)', fontsize=12, fontweight='bold')
+            
+            total = img_data.sum()
+            for bar, count in zip(bars, img_data.values):
+                if count / total > 0.05:
+                    ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                            f'{count/total*100:.1f}%', ha='center', va='bottom', fontsize=9)
+        else:
+            ax4.text(0.5, 0.5, 'No image count column', ha='center', va='center')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+        
+        # 5. Study Statistics Summary
+        ax5 = fig.add_subplot(gs[1, 1])
+        ax5.axis('off')
+        
+        summary = "STUDY DATASET SUMMARY\n" + "=" * 35 + "\n\n"
+        summary += f"Total Studies: {len(df):,}\n\n"
+        
+        # Add statistics for key columns
+        for col_type, pattern in [('Quality', 'quality'), ('Observations', 'observation'), ('QA Pairs', 'qa')]:
+            matching = [c for c in df.columns if pattern in c.lower() and df[c].dtype in ['int64', 'float64']]
+            if matching:
+                col = matching[0]
+                summary += f"{col_type}:\n"
+                summary += f"  Mean: {df[col].mean():.1f}\n"
+                summary += f"  Median: {df[col].median():.0f}\n"
+                summary += f"  Range: [{df[col].min():.0f}, {df[col].max():.0f}]\n\n"
+        
+        ax5.text(0.1, 0.9, summary, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax5.set_title('Summary Statistics', fontsize=12, fontweight='bold')
+        
+        # 6. Training Implications
+        ax6 = fig.add_subplot(gs[1, 2])
+        ax6.axis('off')
+        
+        implications = "TRAINING IMPLICATIONS\n" + "=" * 30 + "\n\n"
+        
+        if quality_cols:
+            high_quality = (df[quality_cols[0]].astype(str).str.contains('A|5|6', na=False)).sum()
+            implications += f"[INFO] High-quality studies:\n       {high_quality:,} ({high_quality/len(df)*100:.1f}%)\n\n"
+        
+        if qa_cols:
+            col = qa_cols[0]
+            low_qa = (df[col] < 10).sum()
+            if low_qa > len(df) * 0.1:
+                implications += f"[WARN] {low_qa:,} studies have <10 QA pairs\n       Consider filtering or weighting\n\n"
+        
+        if obs_cols:
+            col = obs_cols[0]
+            if df[col].median() < 5:
+                implications += "[INFO] Low observation density\n       Simpler scene graphs\n\n"
+            else:
+                implications += "[OK] Good observation density\n       Rich scene graph data\n\n"
+        
+        ax6.text(0.1, 0.9, implications, transform=ax6.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax6.set_title('Training Notes', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('Study Metadata Analysis', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_question_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create meaningful question-level insights visualization."""
+        fig = plt.figure(figsize=(20, 12))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
+        
+        # 1. Question Type Distribution (Most Important)
+        ax1 = fig.add_subplot(gs[0, :2])
+        type_cols = [c for c in df.columns if 'question_type' in c.lower() or 'type' in c.lower()]
+        if type_cols:
+            col = type_cols[0]
+            type_counts = df[col].value_counts().head(15)
+            
+            colors = plt.cm.tab20(np.linspace(0, 1, len(type_counts)))
+            bars = ax1.barh(type_counts.index[::-1], type_counts.values[::-1], color=colors[::-1], edgecolor='white')
+            ax1.set_xlabel('Number of Questions', fontsize=11)
+            ax1.set_title('Question Type Distribution\n(What kinds of questions are in the dataset?)', 
+                         fontsize=12, fontweight='bold')
+            
+            # Add percentage labels
+            total = df[col].count()
+            for bar, count in zip(bars, type_counts.values[::-1]):
+                pct = count / total * 100
+                ax1.text(bar.get_width() + total*0.005, bar.get_y() + bar.get_height()/2,
+                        f'{pct:.1f}%', va='center', fontsize=9)
+            ax1.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        else:
+            ax1.text(0.5, 0.5, 'No question type column', ha='center', va='center')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # 2. Question Statistics
+        ax2 = fig.add_subplot(gs[0, 2])
+        ax2.axis('off')
+        
+        stats = "QUESTION STATISTICS\n" + "=" * 30 + "\n\n"
+        stats += f"Total Questions: {len(df):,}\n\n"
+        
+        if type_cols:
+            col = type_cols[0]
+            stats += f"Question Types: {df[col].nunique()}\n\n"
+            stats += "Top 5 Types:\n"
+            for qtype, count in df[col].value_counts().head(5).items():
+                stats += f"  {str(qtype)[:25]}: {count:,}\n"
+        
+        ax2.text(0.1, 0.9, stats, transform=ax2.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax2.set_title('Statistics', fontsize=12, fontweight='bold')
+        
+        # 3. Boolean Features (e.g., has_region, has_finding)
+        ax3 = fig.add_subplot(gs[1, 0])
+        bool_cols = [c for c in df.columns if df[c].dtype == 'bool'][:6]
+        
+        if bool_cols:
+            true_pcts = [(df[c].sum() / len(df) * 100) for c in bool_cols]
+            short_names = [c.split('.')[-1][:18] for c in bool_cols]
+            
+            colors = ['#27ae60' if p > 50 else '#e74c3c' for p in true_pcts]
+            bars = ax3.barh(short_names, true_pcts, color=colors, edgecolor='white')
+            ax3.set_xlabel('Percentage True (%)', fontsize=11)
+            ax3.set_title('Question Features\n(What information is available?)', fontsize=12, fontweight='bold')
+            ax3.set_xlim(0, 100)
+            ax3.axvline(50, color='gray', linestyle='--', alpha=0.5)
+            
+            for bar, pct in zip(bars, true_pcts):
+                ax3.text(bar.get_width() + 2, bar.get_y() + bar.get_height()/2,
+                        f'{pct:.1f}%', va='center', fontsize=9)
+        else:
+            ax3.text(0.5, 0.5, 'No boolean columns', ha='center', va='center')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        
+        # 4. Quality Indicators
+        ax4 = fig.add_subplot(gs[1, 1])
+        quality_cols = [c for c in df.columns if 'quality' in c.lower()][:4]
+        
+        if quality_cols:
+            quality_data = []
+            for col in quality_cols:
+                if df[col].dtype in ['int64', 'float64']:
+                    quality_data.append({
+                        'name': col.split('.')[-1][:15],
+                        'mean': df[col].mean(),
+                        'max': df[col].max()
+                    })
+            
+            if quality_data:
+                names = [d['name'] for d in quality_data]
+                means = [d['mean'] for d in quality_data]
+                maxes = [d['max'] for d in quality_data]
+                
+                x = np.arange(len(names))
+                width = 0.4
+                
+                ax4.bar(x - width/2, means, width, label='Mean', color='#3498db', edgecolor='white')
+                ax4.bar(x + width/2, maxes, width, label='Max', color='#95a5a6', edgecolor='white', alpha=0.7)
+                
+                ax4.set_ylabel('Value', fontsize=11)
+                ax4.set_title('Quality Metrics\n(Higher = Better)', fontsize=12, fontweight='bold')
+                ax4.set_xticks(x)
+                ax4.set_xticklabels(names, rotation=45, ha='right')
+                ax4.legend()
+        else:
+            ax4.text(0.5, 0.5, 'No quality columns', ha='center', va='center')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+        
+        # 5. Training Recommendations
+        ax5 = fig.add_subplot(gs[1, 2])
+        ax5.axis('off')
+        
+        rec = "TRAINING RECOMMENDATIONS\n" + "=" * 30 + "\n\n"
+        
+        if type_cols:
+            col = type_cols[0]
+            type_dist = df[col].value_counts()
+            max_type_pct = type_dist.iloc[0] / len(df) * 100
+            
+            if max_type_pct > 30:
+                rec += f"[WARN] Dominant question type:\n       {type_dist.index[0][:20]}\n       ({max_type_pct:.1f}%)\n\n"
+                rec += "       Consider balanced sampling\n\n"
+            else:
+                rec += "[OK] Good question type balance\n\n"
+        
+        if bool_cols:
+            low_true = [c for c in bool_cols if df[c].sum() / len(df) < 0.1]
+            if low_true:
+                rec += f"[INFO] {len(low_true)} features are rare (<10%)\n"
+                rec += "       May need oversampling\n\n"
+        
+        ax5.text(0.1, 0.9, rec, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax5.set_title('Recommendations', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('Question Metadata Analysis', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_answer_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create meaningful answer-level insights visualization."""
+        fig = plt.figure(figsize=(20, 12))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
+        
+        # 1. Answer Quality Rating Distribution
+        ax1 = fig.add_subplot(gs[0, 0])
+        rating_cols = [c for c in df.columns if 'rating' in c.lower() and 'quality' in c.lower()]
+        if rating_cols:
+            col = rating_cols[0]
+            rating_counts = df[col].value_counts().sort_index()
+            
+            # Color gradient from red to green
+            n_ratings = len(rating_counts)
+            colors = plt.cm.RdYlGn(np.linspace(0.2, 0.9, n_ratings))
+            
+            bars = ax1.bar(rating_counts.index.astype(str), rating_counts.values, color=colors, edgecolor='white')
+            ax1.set_xlabel('Quality Rating', fontsize=11)
+            ax1.set_ylabel('Number of Answers', fontsize=11)
+            ax1.set_title('Answer Quality Distribution\n(D=Low, A++=High)', fontsize=12, fontweight='bold')
+            ax1.tick_params(axis='x', rotation=45)
+        else:
+            ax1.text(0.5, 0.5, 'No rating column', ha='center', va='center')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # 2. Answer Type Distribution
+        ax2 = fig.add_subplot(gs[0, 1])
+        type_cols = [c for c in df.columns if 'type' in c.lower() and 'answer' in c.lower()]
+        if type_cols:
+            col = type_cols[0]
+            type_counts = df[col].value_counts()
+            
+            colors = ['#3498db', '#e74c3c', '#27ae60', '#f39c12'][:len(type_counts)]
+            wedges, texts, autotexts = ax2.pie(
+                type_counts.values, labels=type_counts.index, autopct='%1.1f%%',
+                colors=colors, wedgeprops=dict(width=0.6, edgecolor='white'),
+                textprops={'fontsize': 10}
+            )
+            ax2.set_title('Answer Type Distribution\n(Binary vs. Category)', fontsize=12, fontweight='bold')
+            
+            # Center text
+            ax2.text(0, 0, f'{len(df):,}\nanswers', ha='center', va='center', fontsize=12, fontweight='bold')
+        else:
+            ax2.text(0.5, 0.5, 'No answer type column', ha='center', va='center')
+        
+        # 3. Quality Sub-metrics
+        ax3 = fig.add_subplot(gs[0, 2])
+        quality_int_cols = [c for c in df.columns if 'quality' in c.lower() and df[c].dtype in ['int64', 'int32']][:5]
+        
+        if quality_int_cols:
+            means = [df[c].mean() for c in quality_int_cols]
+            short_names = [c.split('.')[-1].replace('_quality', '')[:12] for c in quality_int_cols]
+            
+            colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(means)))
+            bars = ax3.barh(short_names, means, color=colors, edgecolor='white')
+            ax3.set_xlabel('Mean Quality Score', fontsize=11)
+            ax3.set_title('Quality Sub-metrics\n(Detailed Quality Breakdown)', fontsize=12, fontweight='bold')
+            
+            for bar, mean in zip(bars, means):
+                ax3.text(bar.get_width() + 0.05, bar.get_y() + bar.get_height()/2,
+                        f'{mean:.2f}', va='center', fontsize=10)
+        else:
+            ax3.text(0.5, 0.5, 'No quality sub-metrics', ha='center', va='center')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        
+        # 4. Boolean Features Distribution
+        ax4 = fig.add_subplot(gs[1, 0])
+        bool_cols = [c for c in df.columns if df[c].dtype == 'bool'][:6]
+        
+        if bool_cols:
+            data = {'True': [], 'False': []}
+            names = []
+            for col in bool_cols:
+                true_pct = df[col].sum() / len(df) * 100
+                data['True'].append(true_pct)
+                data['False'].append(100 - true_pct)
+                names.append(col.split('.')[-1][:15])
+            
+            x = np.arange(len(names))
+            width = 0.6
+            
+            ax4.barh(names, data['True'], width, label='True', color='#27ae60', edgecolor='white')
+            ax4.barh(names, data['False'], width, left=data['True'], label='False', color='#e74c3c', edgecolor='white')
+            
+            ax4.set_xlabel('Percentage (%)', fontsize=11)
+            ax4.set_title('Answer Features\n(True/False Split)', fontsize=12, fontweight='bold')
+            ax4.legend(loc='lower right')
+            ax4.set_xlim(0, 100)
+        else:
+            ax4.text(0.5, 0.5, 'No boolean features', ha='center', va='center')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+        
+        # 5. Statistics Summary
+        ax5 = fig.add_subplot(gs[1, 1])
+        ax5.axis('off')
+        
+        stats = "ANSWER STATISTICS\n" + "=" * 30 + "\n\n"
+        stats += f"Total Answers: {len(df):,}\n\n"
+        
+        if rating_cols:
+            col = rating_cols[0]
+            high_quality = df[col].astype(str).str.contains('A', na=False).sum()
+            stats += f"High Quality (A+):\n  {high_quality:,} ({high_quality/len(df)*100:.1f}%)\n\n"
+        
+        if type_cols:
+            col = type_cols[0]
+            for atype, count in df[col].value_counts().items():
+                stats += f"{atype}: {count:,}\n"
+        
+        ax5.text(0.1, 0.9, stats, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax5.set_title('Summary', fontsize=12, fontweight='bold')
+        
+        # 6. Recommendations
+        ax6 = fig.add_subplot(gs[1, 2])
+        ax6.axis('off')
+        
+        rec = "RECOMMENDATIONS\n" + "=" * 30 + "\n\n"
+        
+        if rating_cols:
+            col = rating_cols[0]
+            low_quality = df[col].astype(str).str.contains('D|C|0_|1_', na=False).sum()
+            low_pct = low_quality / len(df) * 100
+            
+            if low_pct > 10:
+                rec += f"[WARN] {low_pct:.1f}% low-quality answers\n       Filter with quality_grade='A'\n\n"
+            else:
+                rec += "[OK] Good answer quality overall\n\n"
+        
+        if bool_cols:
+            has_entity = [c for c in bool_cols if 'entit' in c.lower()]
+            if has_entity:
+                entity_pct = df[has_entity[0]].sum() / len(df) * 100
+                rec += f"[INFO] {entity_pct:.1f}% have entities\n       Good for entity-aware models\n\n"
+        
+        ax6.text(0.1, 0.9, rec, transform=ax6.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax6.set_title('Recommendations', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('Answer Metadata Analysis', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_image_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create meaningful image-level insights visualization."""
+        fig = plt.figure(figsize=(20, 12))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
+        
+        # 1. View Position Distribution
+        ax1 = fig.add_subplot(gs[0, 0])
+        view_cols = [c for c in df.columns if 'view' in c.lower()]
+        if view_cols:
+            col = view_cols[0]
+            view_counts = df[col].value_counts().head(6)
+            
+            colors = ['#3498db', '#e74c3c', '#27ae60', '#f39c12', '#9b59b6', '#1abc9c']
+            wedges, texts, autotexts = ax1.pie(
+                view_counts.values, labels=view_counts.index, autopct='%1.1f%%',
+                colors=colors[:len(view_counts)], 
+                wedgeprops=dict(edgecolor='white', linewidth=2),
+                textprops={'fontsize': 10}
+            )
+            ax1.set_title('X-Ray View Positions\n(AP, PA, Lateral, etc.)', fontsize=12, fontweight='bold')
+        else:
+            ax1.text(0.5, 0.5, 'No view column', ha='center', va='center')
+        
+        # 2. Image Dimensions (Height)
+        ax2 = fig.add_subplot(gs[0, 1])
+        height_cols = [c for c in df.columns if 'height' in c.lower() or 'rows' in c.lower()]
+        width_cols = [c for c in df.columns if 'width' in c.lower() or 'columns' in c.lower()]
+        
+        if height_cols:
+            col = height_cols[0]
+            height_data = df[col].dropna()
+            
+            ax2.hist(height_data, bins=50, color='#3498db', edgecolor='white', alpha=0.8)
+            ax2.axvline(height_data.median(), color='#e74c3c', linestyle='--', linewidth=2,
+                       label=f'Median: {height_data.median():.0f}px')
+            ax2.set_xlabel('Image Height (pixels)', fontsize=11)
+            ax2.set_ylabel('Frequency', fontsize=11)
+            ax2.set_title('Image Height Distribution\n(Vertical Resolution)', fontsize=12, fontweight='bold')
+            ax2.legend()
+        else:
+            ax2.text(0.5, 0.5, 'No height column', ha='center', va='center')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # 3. Image Dimensions (Width)
+        ax3 = fig.add_subplot(gs[0, 2])
+        if width_cols:
+            col = width_cols[0]
+            width_data = df[col].dropna()
+            
+            ax3.hist(width_data, bins=50, color='#27ae60', edgecolor='white', alpha=0.8)
+            ax3.axvline(width_data.median(), color='#e74c3c', linestyle='--', linewidth=2,
+                       label=f'Median: {width_data.median():.0f}px')
+            ax3.set_xlabel('Image Width (pixels)', fontsize=11)
+            ax3.set_ylabel('Frequency', fontsize=11)
+            ax3.set_title('Image Width Distribution\n(Horizontal Resolution)', fontsize=12, fontweight='bold')
+            ax3.legend()
+        else:
+            ax3.text(0.5, 0.5, 'No width column', ha='center', va='center')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        
+        # 4. Aspect Ratio / 2D Scatter
+        ax4 = fig.add_subplot(gs[1, 0])
+        if height_cols and width_cols:
+            h_col = height_cols[0]
+            w_col = width_cols[0]
+            
+            # Sample for performance
+            sample_size = min(5000, len(df))
+            sample_idx = np.random.choice(len(df), sample_size, replace=False)
+            h_sample = df[h_col].iloc[sample_idx]
+            w_sample = df[w_col].iloc[sample_idx]
+            
+            ax4.scatter(w_sample, h_sample, alpha=0.3, s=5, c='#3498db')
+            ax4.set_xlabel('Width (pixels)', fontsize=11)
+            ax4.set_ylabel('Height (pixels)', fontsize=11)
+            ax4.set_title('Image Dimensions Scatter\n(Width vs Height)', fontsize=12, fontweight='bold')
+            
+            # Add 1:1 line
+            max_dim = max(df[h_col].max(), df[w_col].max())
+            ax4.plot([0, max_dim], [0, max_dim], 'r--', alpha=0.5, label='1:1 ratio')
+            ax4.legend()
+        else:
+            ax4.text(0.5, 0.5, 'No dimension columns', ha='center', va='center')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+        
+        # 5. Statistics Summary
+        ax5 = fig.add_subplot(gs[1, 1])
+        ax5.axis('off')
+        
+        stats = "IMAGE STATISTICS\n" + "=" * 30 + "\n\n"
+        stats += f"Total Images: {len(df):,}\n\n"
+        
+        if view_cols:
+            col = view_cols[0]
+            stats += f"View Types: {df[col].nunique()}\n"
+            frontal = df[col].isin(['AP', 'PA']).sum()
+            stats += f"Frontal (AP/PA): {frontal:,}\n\n"
+        
+        if height_cols and width_cols:
+            stats += f"Resolution:\n"
+            stats += f"  Height: {df[height_cols[0]].mean():.0f} +/- {df[height_cols[0]].std():.0f}\n"
+            stats += f"  Width: {df[width_cols[0]].mean():.0f} +/- {df[width_cols[0]].std():.0f}\n"
+        
+        ax5.text(0.1, 0.9, stats, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax5.set_title('Summary', fontsize=12, fontweight='bold')
+        
+        # 6. Preprocessing Notes
+        ax6 = fig.add_subplot(gs[1, 2])
+        ax6.axis('off')
+        
+        notes = "PREPROCESSING NOTES\n" + "=" * 30 + "\n\n"
+        
+        if height_cols and width_cols:
+            h_std = df[height_cols[0]].std()
+            w_std = df[width_cols[0]].std()
+            
+            if h_std > 500 or w_std > 500:
+                notes += "[INFO] High resolution variance\n       Resize to consistent size\n       (e.g., 224x224 for model)\n\n"
+            else:
+                notes += "[OK] Consistent image sizes\n\n"
+        
+        if view_cols:
+            lateral = df[view_cols[0]].isin(['LATERAL', 'LL']).sum()
+            lateral_pct = lateral / len(df) * 100
+            
+            if lateral_pct > 20:
+                notes += f"[INFO] {lateral_pct:.1f}% lateral views\n       Consider view-specific models\n       or frontal-only filtering\n\n"
+            else:
+                notes += "[OK] Mostly frontal views\n\n"
+        
+        ax6.text(0.1, 0.9, notes, transform=ax6.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax6.set_title('Notes', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('Image Metadata Analysis', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_generic_overview(self, filename: str, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Fallback visualization for unknown metadata files."""
+        fig = plt.figure(figsize=(16, 10))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3)
+        
+        # 1. Column types
+        ax1 = fig.add_subplot(gs[0, 0])
+        dtype_counts = df.dtypes.astype(str).value_counts()
+        colors = plt.cm.Set2(np.linspace(0, 1, len(dtype_counts)))
+        ax1.pie(dtype_counts.values, labels=dtype_counts.index, autopct='%1.1f%%', colors=colors)
+        ax1.set_title('Column Data Types', fontweight='bold')
+        
+        # 2. Missing values
+        ax2 = fig.add_subplot(gs[0, 1])
+        null_pcts = (df.isnull().sum() / len(df) * 100).sort_values(ascending=False).head(10)
+        colors = ['#e74c3c' if p > 20 else '#f39c12' if p > 5 else '#27ae60' for p in null_pcts.values]
+        ax2.barh([c[:20] for c in null_pcts.index], null_pcts.values, color=colors)
+        ax2.set_xlabel('Missing Values (%)')
+        ax2.set_title('Top 10 Columns with Missing Values', fontweight='bold')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        # 3. Summary stats
+        ax3 = fig.add_subplot(gs[1, 0])
+        ax3.axis('off')
+        
+        summary = f"FILE: {filename}\n" + "=" * 40 + "\n\n"
+        summary += f"Rows: {len(df):,}\n"
+        summary += f"Columns: {len(df.columns)}\n"
+        summary += f"Memory: {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB\n\n"
+        summary += f"Column Types:\n"
+        for dtype, count in df.dtypes.astype(str).value_counts().items():
+            summary += f"  {dtype}: {count}\n"
+        
+        ax3.text(0.1, 0.9, summary, transform=ax3.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1'))
+        ax3.set_title('File Summary', fontweight='bold')
+        
+        # 4. Column names
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax4.axis('off')
+        
+        cols_text = "COLUMNS\n" + "=" * 30 + "\n\n"
+        for i, col in enumerate(df.columns[:15], 1):
+            cols_text += f"{i:2d}. {col[:35]}\n"
+        if len(df.columns) > 15:
+            cols_text += f"\n... and {len(df.columns) - 15} more"
+        
+        ax4.text(0.1, 0.9, cols_text, transform=ax4.transAxes, fontsize=9,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow'))
+        ax4.set_title('Column Names', fontweight='bold')
+        
+        fig.suptitle(f'{filename} Overview', fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_chexpert_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create holistic CheXpert labels visualization - ALL 14 conditions in one comparative view."""
+        # Get all CheXpert condition columns (exclude IDs)
+        id_cols = ['subject_id', 'study_id']
+        condition_cols = [c for c in df.columns if c not in id_cols]
+        
+        if not condition_cols:
+            return
+        
+        fig = plt.figure(figsize=(20, 14))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 2, figure=fig, height_ratios=[1.5, 1], hspace=0.25, wspace=0.2)
+        
+        # 1. MAIN: Stacked bar chart comparing ALL conditions (Positive/Negative/Uncertain/Missing)
+        ax1 = fig.add_subplot(gs[0, :])
+        
+        condition_stats = []
+        for col in condition_cols:
+            total = len(df)
+            positive = (df[col] == 1.0).sum()
+            negative = (df[col] == 0.0).sum()
+            uncertain = (df[col] == -1.0).sum()
+            missing = df[col].isna().sum()
+            
+            condition_stats.append({
+                'condition': col,
+                'positive': positive / total * 100,
+                'negative': negative / total * 100,
+                'uncertain': uncertain / total * 100,
+                'missing': missing / total * 100,
+                'pos_count': positive
+            })
+        
+        # Sort by positive rate for better visualization
+        condition_stats = sorted(condition_stats, key=lambda x: x['positive'], reverse=True)
+        conditions = [s['condition'] for s in condition_stats]
+        
+        x = np.arange(len(conditions))
+        width = 0.7
+        
+        positive = [s['positive'] for s in condition_stats]
+        negative = [s['negative'] for s in condition_stats]
+        uncertain = [s['uncertain'] for s in condition_stats]
+        missing = [s['missing'] for s in condition_stats]
+        
+        # Stacked bars
+        p1 = ax1.bar(x, positive, width, label='Positive (1.0)', color='#e74c3c', edgecolor='white')
+        p2 = ax1.bar(x, negative, width, bottom=positive, label='Negative (0.0)', color='#27ae60', edgecolor='white')
+        p3 = ax1.bar(x, uncertain, width, bottom=[p+n for p,n in zip(positive,negative)], 
+                    label='Uncertain (-1.0)', color='#f39c12', edgecolor='white')
+        p4 = ax1.bar(x, missing, width, bottom=[p+n+u for p,n,u in zip(positive,negative,uncertain)], 
+                    label='Missing (NaN)', color='#95a5a6', edgecolor='white')
+        
+        ax1.set_ylabel('Percentage of Studies (%)', fontsize=12)
+        ax1.set_title('CheXpert Label Distribution Across ALL 14 Conditions\n(Each bar = 100% of studies)', 
+                     fontsize=14, fontweight='bold')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(conditions, rotation=45, ha='right', fontsize=10)
+        ax1.legend(loc='upper right', fontsize=10)
+        ax1.set_ylim(0, 105)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        
+        # Add positive count labels on bars
+        for i, (bar, stat) in enumerate(zip(p1, condition_stats)):
+            if stat['positive'] > 5:
+                ax1.text(bar.get_x() + bar.get_width()/2, stat['positive']/2, 
+                        f"{stat['pos_count']:,}", ha='center', va='center', 
+                        fontsize=8, color='white', fontweight='bold')
+        
+        # 2. Positive rate ranking (simpler view)
+        ax2 = fig.add_subplot(gs[1, 0])
+        pos_rates = [s['positive'] for s in condition_stats]
+        colors = plt.cm.RdYlGn_r(np.linspace(0.1, 0.9, len(conditions)))
+        
+        bars = ax2.barh(conditions[::-1], pos_rates[::-1], color=colors[::-1], edgecolor='white')
+        ax2.set_xlabel('Positive Rate (%)', fontsize=11)
+        ax2.set_title('Conditions Ranked by Positive Rate\n(How common is each finding?)', fontsize=12, fontweight='bold')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        
+        for bar, rate in zip(bars, pos_rates[::-1]):
+            ax2.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                    f'{rate:.1f}%', va='center', fontsize=9)
+        
+        # 3. Summary and insights
+        ax3 = fig.add_subplot(gs[1, 1])
+        ax3.axis('off')
+        
+        summary = "CHEXPERT LABELS SUMMARY\n" + "=" * 40 + "\n\n"
+        summary += f"Total Studies: {len(df):,}\n"
+        summary += f"Conditions: {len(condition_cols)}\n\n"
+        
+        summary += "Top 5 Most Common Findings:\n"
+        for s in condition_stats[:5]:
+            summary += f"  {s['condition']}: {s['positive']:.1f}%\n"
+        
+        summary += "\nLeast Common Findings:\n"
+        for s in condition_stats[-3:]:
+            summary += f"  {s['condition']}: {s['positive']:.1f}%\n"
+        
+        # Calculate overall stats
+        avg_positive = np.mean([s['positive'] for s in condition_stats])
+        avg_missing = np.mean([s['missing'] for s in condition_stats])
+        
+        summary += f"\n--- Dataset Quality ---\n"
+        summary += f"Avg Positive Rate: {avg_positive:.1f}%\n"
+        summary += f"Avg Missing Rate: {avg_missing:.1f}%\n"
+        
+        if avg_missing > 50:
+            summary += "\n[!] High missing rate - many unlabeled\n    Use uncertainty-aware training"
+        
+        ax3.text(0.05, 0.95, summary, transform=ax3.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax3.set_title('Summary & Insights', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('CheXpert Labels: Complete 14-Condition Overview', fontsize=16, fontweight='bold', y=1.01)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_split_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create holistic train/val/test split visualization."""
+        fig = plt.figure(figsize=(16, 8))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(1, 2, figure=fig, width_ratios=[1.5, 1])
+        
+        # Find split column
+        split_col = None
+        for col in df.columns:
+            if 'split' in col.lower():
+                split_col = col
+                break
+        
+        if split_col is None:
+            split_col = df.columns[0]  # Fallback
+        
+        split_counts = df[split_col].value_counts()
+        
+        # 1. Main bar chart
+        ax1 = fig.add_subplot(gs[0, 0])
+        colors = {'train': '#27ae60', 'validate': '#3498db', 'test': '#e74c3c'}
+        bar_colors = [colors.get(s.lower() if isinstance(s, str) else str(s), '#95a5a6') for s in split_counts.index]
+        
+        bars = ax1.bar(split_counts.index, split_counts.values, color=bar_colors, edgecolor='white', linewidth=2)
+        ax1.set_ylabel('Number of Samples', fontsize=12)
+        ax1.set_title('Dataset Split Distribution', fontsize=14, fontweight='bold')
+        
+        # Add count and percentage labels
+        total = split_counts.sum()
+        for bar, (split, count) in zip(bars, split_counts.items()):
+            pct = count / total * 100
+            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + total*0.01, 
+                    f'{count:,}\n({pct:.1f}%)', ha='center', va='bottom', fontsize=11, fontweight='bold')
+        ax1.set_ylim(0, max(split_counts.values) * 1.15)
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.ticklabel_format(style='sci', axis='y', scilimits=(0,0))
+        
+        # 2. Summary
+        ax2 = fig.add_subplot(gs[0, 1])
+        ax2.axis('off')
+        
+        summary = "SPLIT SUMMARY\n" + "=" * 30 + "\n\n"
+        summary += f"Total Samples: {total:,}\n\n"
+        
+        for split, count in split_counts.items():
+            pct = count / total * 100
+            summary += f"{split}: {count:,} ({pct:.1f}%)\n"
+        
+        summary += "\n--- Ratio ---\n"
+        ratios = [f"{count/total*100:.0f}" for count in split_counts.values]
+        summary += f"  {':'.join(ratios)}\n"
+        
+        ax2.text(0.1, 0.9, summary, transform=ax2.transAxes, fontsize=12,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1'))
+        
+        fig.suptitle('Dataset Split Overview', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
+    
+    def _create_mimic_metadata_overview(self, df: pd.DataFrame, output_path: Path, description: str = ""):
+        """Create holistic MIMIC-CXR metadata visualization showing views, dimensions, procedures together."""
+        fig = plt.figure(figsize=(20, 14))
+        fig.patch.set_facecolor('#f8f9fa')
+        gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.3, wspace=0.25)
+        
+        # 1. View Position Distribution (Main clinical info)
+        ax1 = fig.add_subplot(gs[0, 0])
+        view_col = 'ViewPosition' if 'ViewPosition' in df.columns else None
+        
+        if view_col:
+            view_counts = df[view_col].value_counts().head(6)
+            colors = ['#3498db', '#e74c3c', '#27ae60', '#f39c12', '#9b59b6', '#1abc9c']
+            
+            wedges, texts, autotexts = ax1.pie(
+                view_counts.values, labels=view_counts.index, autopct='%1.1f%%',
+                colors=colors[:len(view_counts)], 
+                wedgeprops=dict(edgecolor='white', linewidth=2),
+                textprops={'fontsize': 10}
+            )
+            ax1.set_title('X-Ray View Positions\n(Clinical Perspective)', fontsize=12, fontweight='bold')
+        else:
+            ax1.text(0.5, 0.5, 'No ViewPosition column', ha='center', va='center')
+        
+        # 2. Image Dimensions 2D Histogram (Shows resolution patterns)
+        ax2 = fig.add_subplot(gs[0, 1])
+        height_col = 'Rows' if 'Rows' in df.columns else None
+        width_col = 'Columns' if 'Columns' in df.columns else None
+        
+        if height_col and width_col:
+            # Sample for performance
+            sample_size = min(10000, len(df))
+            sample_df = df.sample(sample_size) if len(df) > sample_size else df
+            
+            h = ax2.hist2d(sample_df[width_col], sample_df[height_col], bins=30, cmap='Blues')
+            ax2.set_xlabel('Width (pixels)', fontsize=11)
+            ax2.set_ylabel('Height (pixels)', fontsize=11)
+            ax2.set_title('Image Resolution Distribution\n(Density Heatmap)', fontsize=12, fontweight='bold')
+            plt.colorbar(h[3], ax=ax2, label='Count')
+        else:
+            ax2.text(0.5, 0.5, 'No dimension columns', ha='center', va='center')
+        
+        # 3. Procedure Types (What kind of X-rays)
+        ax3 = fig.add_subplot(gs[0, 2])
+        proc_col = 'ProcedureCodeSequence_CodeMeaning' if 'ProcedureCodeSequence_CodeMeaning' in df.columns else None
+        
+        if proc_col:
+            proc_counts = df[proc_col].value_counts().head(6)
+            short_names = [str(p)[:25] + '...' if len(str(p)) > 25 else str(p) for p in proc_counts.index]
+            
+            colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(proc_counts)))
+            bars = ax3.barh(short_names[::-1], proc_counts.values[::-1], color=colors[::-1], edgecolor='white')
+            ax3.set_xlabel('Count', fontsize=11)
+            ax3.set_title('Procedure Types\n(Why was X-ray taken?)', fontsize=12, fontweight='bold')
+            ax3.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+        else:
+            ax3.text(0.5, 0.5, 'No procedure column', ha='center', va='center')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        
+        # 4. Frontal vs Lateral (Important for model training)
+        ax4 = fig.add_subplot(gs[1, 0])
+        if view_col:
+            frontal = df[view_col].isin(['AP', 'PA']).sum()
+            lateral = df[view_col].isin(['LATERAL', 'LL']).sum()
+            other = len(df) - frontal - lateral
+            
+            values = [frontal, lateral, other]
+            labels = ['Frontal (AP/PA)', 'Lateral', 'Other']
+            colors = ['#3498db', '#27ae60', '#95a5a6']
+            
+            wedges, texts, autotexts = ax4.pie(
+                values, labels=labels, autopct='%1.1f%%',
+                colors=colors, wedgeprops=dict(edgecolor='white', linewidth=2),
+                textprops={'fontsize': 10}
+            )
+            ax4.set_title('Frontal vs Lateral Views\n(Training Data Split)', fontsize=12, fontweight='bold')
+        else:
+            ax4.text(0.5, 0.5, 'No view data', ha='center', va='center')
+        
+        # 5. Resolution Statistics Box
+        ax5 = fig.add_subplot(gs[1, 1])
+        ax5.axis('off')
+        
+        summary = "IMAGE STATISTICS\n" + "=" * 35 + "\n\n"
+        summary += f"Total Images: {len(df):,}\n\n"
+        
+        if height_col and width_col:
+            summary += f"Height (pixels):\n"
+            summary += f"  Mean: {df[height_col].mean():.0f}\n"
+            summary += f"  Std:  {df[height_col].std():.0f}\n"
+            summary += f"  Range: [{df[height_col].min()}, {df[height_col].max()}]\n\n"
+            
+            summary += f"Width (pixels):\n"
+            summary += f"  Mean: {df[width_col].mean():.0f}\n"
+            summary += f"  Std:  {df[width_col].std():.0f}\n"
+            summary += f"  Range: [{df[width_col].min()}, {df[width_col].max()}]\n"
+        
+        ax5.text(0.1, 0.9, summary, transform=ax5.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='#ecf0f1', edgecolor='#bdc3c7'))
+        ax5.set_title('Resolution Stats', fontsize=12, fontweight='bold')
+        
+        # 6. Training Recommendations
+        ax6 = fig.add_subplot(gs[1, 2])
+        ax6.axis('off')
+        
+        rec = "PREPROCESSING NOTES\n" + "=" * 30 + "\n\n"
+        
+        if view_col:
+            frontal_pct = df[view_col].isin(['AP', 'PA']).sum() / len(df) * 100
+            if frontal_pct < 70:
+                rec += f"[INFO] {frontal_pct:.1f}% frontal views\n"
+                rec += "       Consider view-specific filtering\n\n"
+            else:
+                rec += f"[OK] {frontal_pct:.1f}% frontal views\n       Good for frontal-focused models\n\n"
+        
+        if height_col and width_col:
+            std_h = df[height_col].std()
+            if std_h > 500:
+                rec += "[!] High resolution variance\n"
+                rec += "    Resize to consistent size\n"
+                rec += "    (e.g., 224x224 or 512x512)\n\n"
+            else:
+                rec += "[OK] Consistent image sizes\n\n"
+        
+        rec += "[TIP] Use transforms:\n"
+        rec += "  - Resize to model input size\n"
+        rec += "  - Normalize with ImageNet stats\n"
+        rec += "  - Consider histogram equalization\n"
+        
+        ax6.text(0.1, 0.9, rec, transform=ax6.transAxes, fontsize=10,
+                va='top', fontfamily='monospace',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', edgecolor='#f0ad4e'))
+        ax6.set_title('Preprocessing Tips', fontsize=12, fontweight='bold')
+        
+        fig.suptitle('MIMIC-CXR Image Metadata Overview', fontsize=16, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='#f8f9fa')
+        plt.close()
     
     def _create_column_summary_plot(self, filename: str, df: pd.DataFrame, viz_dir: Path):
         """Create a summary overview of all columns in the file."""
@@ -2291,7 +3277,7 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
                 plt.savefig(out_path, dpi=150, bbox_inches='tight')
                 plt.close(fig)
                 
-                logger.info(f"  ✓ Saved: {out_path.name}")
+                logger.info(f"  [OK] Saved: {out_path.name}")
                 successful += 1
                 
             except Exception as e:
@@ -2299,20 +3285,293 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
                 continue
         
         if successful > 0:
-            logger.info(f"\n📸 {successful} visualizations saved to: {viz_dir}")
+            logger.info(f"\n[IMG] {successful} visualizations saved to: {viz_dir}")
+        
+        # Now create combined image + network graph visualizations
+        self._visualize_image_with_network(num_samples)
+
+    def _visualize_image_with_network(self, num_samples: int = 10):
+        """
+        Create comprehensive visualization combining:
+        - Chest X-ray image with bounding boxes
+        - Network graph showing observation relationships
+        - Clinical summary panel
+        
+        This provides the complete picture of a patient's data.
+        """
+        if not PLOTTING_AVAILABLE or not NETWORKX_AVAILABLE or not PIL_AVAILABLE:
+            logger.warning("Required libraries not available for combined visualization")
+            return
+        
+        logger.info(f"\n[COMBINED] Creating combined image + network graph visualizations...")
+        
+        qa_dir = self.mimic_qa_path / 'qa'
+        if not qa_dir.exists():
+            return
+        
+        qa_files = list(qa_dir.rglob('*.qa.json'))
+        if not qa_files:
+            return
+        
+        sample_pool = random.sample(qa_files, min(num_samples * 4, len(qa_files)))
+        viz_dir = self.output_dir / 'combined_visualizations'
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        
+        successful = 0
+        
+        for qa_file in sample_pool:
+            if successful >= num_samples:
+                break
+            
+            try:
+                with open(qa_file) as f:
+                    qa_data = json.load(f)
+                
+                patient_id = qa_data.get('patient_id', qa_file.parts[-2])
+                study_id = qa_data.get('study_id', qa_file.stem.split('.')[0])
+                
+                # Get image
+                img_path = self._get_image_path(patient_id, study_id)
+                if img_path is None or not img_path.exists():
+                    continue
+                
+                # Get scene graph
+                sg_path = self._get_scene_graph_path(patient_id, study_id)
+                if sg_path is None or not sg_path.exists():
+                    continue
+                
+                with open(sg_path) as f:
+                    sg = json.load(f)
+                
+                observations = sg.get('observations', {})
+                if len(observations) < 3:
+                    continue  # Need enough data for interesting graph
+                
+                image = Image.open(img_path).convert('RGB')
+                img_width, img_height = image.size
+                
+                # ============ Create 3-panel visualization ============
+                fig = plt.figure(figsize=(24, 12))
+                gs = gridspec.GridSpec(2, 4, figure=fig, width_ratios=[1.5, 1.5, 1.2, 0.8], 
+                                       height_ratios=[2, 1], hspace=0.2, wspace=0.2)
+                
+                # ========== Panel 1: X-ray Image with Bounding Boxes ==========
+                ax_img = fig.add_subplot(gs[:, 0])
+                ax_img.imshow(image, cmap='gray')
+                
+                # Draw bounding boxes from observations
+                COLOR_POS = '#e74c3c'
+                COLOR_NEG = '#27ae60'
+                COLOR_UNK = '#f39c12'
+                
+                bbox_count = 0
+                for obs_id, obs in list(observations.items())[:8]:
+                    positiveness = obs.get('positiveness', 'unknown')
+                    if positiveness == 'pos':
+                        color = COLOR_POS
+                    elif positiveness == 'neg':
+                        color = COLOR_NEG
+                    else:
+                        color = COLOR_UNK
+                    
+                    locs = obs.get('localization', {})
+                    for img_id, loc_data in locs.items():
+                        bboxes = loc_data.get('bboxes', []) or []
+                        for bb in bboxes[:2]:  # Max 2 per observation
+                            if len(bb) == 4:
+                                x1, y1, x2, y2 = bb
+                                rect = plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                                     linewidth=2.5, edgecolor=color, 
+                                                     facecolor=color, alpha=0.15)
+                                ax_img.add_patch(rect)
+                                
+                                # Add border
+                                rect_border = plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                                           linewidth=2, edgecolor=color, 
+                                                           facecolor='none')
+                                ax_img.add_patch(rect_border)
+                                
+                                # Compact label
+                                obs_name = obs.get('name', obs_id)[:18]
+                                ax_img.text(x1 + 2, y1 + 12, obs_name, fontsize=7, color='white',
+                                           fontweight='bold',
+                                           bbox=dict(boxstyle='round,pad=0.15', facecolor=color, 
+                                                    alpha=0.85, edgecolor='none'))
+                                bbox_count += 1
+                
+                ax_img.set_title(f'Chest X-Ray: {patient_id}/{study_id}\n{img_path.name} ({img_width}x{img_height})',
+                                fontsize=11, fontweight='bold')
+                ax_img.axis('off')
+                
+                # Add legend
+                legend_patches = [
+                    mpatches.Patch(color=COLOR_POS, label='Positive Finding', alpha=0.8),
+                    mpatches.Patch(color=COLOR_NEG, label='Negative/Normal', alpha=0.8),
+                    mpatches.Patch(color=COLOR_UNK, label='Uncertain', alpha=0.8),
+                ]
+                ax_img.legend(handles=legend_patches, loc='lower right', fontsize=8, 
+                             framealpha=0.9, edgecolor='gray')
+                
+                # ========== Panel 2: Network Graph ==========
+                ax_graph = fig.add_subplot(gs[:, 1])
+                
+                # Build network graph
+                G = nx.Graph()
+                node_colors = []
+                node_sizes = []
+                node_labels = {}
+                
+                obs_list = list(observations.items())[:10]
+                
+                for obs_id, obs in obs_list:
+                    short_name = obs.get('name', obs_id)[:18]
+                    G.add_node(obs_id, node_type='obs')
+                    node_labels[obs_id] = short_name
+                    
+                    polarity = obs.get('positiveness', 'unknown')
+                    if polarity == 'pos':
+                        node_colors.append(COLOR_POS)
+                    elif polarity == 'neg':
+                        node_colors.append(COLOR_NEG)
+                    else:
+                        node_colors.append(COLOR_UNK)
+                    node_sizes.append(1800)
+                    
+                    # Add region connections
+                    for region in obs.get('obs_regions', [])[:2]:
+                        region_node = f"R:{region[:12]}"
+                        if not G.has_node(region_node):
+                            G.add_node(region_node, node_type='region')
+                            node_labels[region_node] = region[:12]
+                            node_colors.append('#3498db')
+                            node_sizes.append(1000)
+                        G.add_edge(obs_id, region_node)
+                    
+                    # Add entity connections
+                    for entity in obs.get('obs_entities', [])[:2]:
+                        entity_node = f"E:{entity[:12]}"
+                        if not G.has_node(entity_node):
+                            G.add_node(entity_node, node_type='entity')
+                            node_labels[entity_node] = entity[:12]
+                            node_colors.append('#9b59b6')
+                            node_sizes.append(800)
+                        G.add_edge(obs_id, entity_node)
+                
+                if len(G.nodes()) >= 3:
+                    try:
+                        pos = nx.kamada_kawai_layout(G)
+                    except:
+                        pos = nx.spring_layout(G, k=2.5, iterations=50, seed=42)
+                    
+                    # Draw edges
+                    nx.draw_networkx_edges(G, pos, ax=ax_graph, alpha=0.4, 
+                                          edge_color='#7f8c8d', width=1.5)
+                    
+                    # Draw nodes
+                    nx.draw_networkx_nodes(G, pos, ax=ax_graph,
+                                          node_color=node_colors,
+                                          node_size=node_sizes,
+                                          alpha=0.9)
+                    
+                    # Draw labels
+                    nx.draw_networkx_labels(G, pos, node_labels, ax=ax_graph,
+                                           font_size=7, font_weight='bold')
+                
+                ax_graph.set_title(f'Scene Graph Network\n({len(G.nodes())} nodes, {len(G.edges())} edges)',
+                                  fontsize=11, fontweight='bold')
+                ax_graph.axis('off')
+                
+                # ========== Panel 3: Clinical Details ==========
+                ax_clinical = fig.add_subplot(gs[0, 2:])
+                ax_clinical.axis('off')
+                
+                # Build clinical summary
+                indication = sg.get('indication', {})
+                sentences = sg.get('sentences', {})
+                
+                clinical_text = "CLINICAL CONTEXT\n" + "=" * 50 + "\n\n"
+                
+                if indication.get('indication_summary'):
+                    clinical_text += f"Indication:\n  {indication['indication_summary'][:120]}...\n\n"
+                
+                if indication.get('patient_info'):
+                    clinical_text += f"Patient Info:\n  {indication['patient_info'][:100]}\n\n"
+                
+                # Add first report sentence
+                if sentences:
+                    first_sent = list(sentences.values())[0]
+                    sent_text = first_sent.get('sentence', '')[:150]
+                    section = first_sent.get('section_type', 'REPORT')
+                    clinical_text += f"Report ({section}):\n  \"{sent_text}...\"\n"
+                
+                ax_clinical.text(0.02, 0.95, clinical_text, transform=ax_clinical.transAxes,
+                                fontsize=10, verticalalignment='top', fontfamily='monospace',
+                                bbox=dict(boxstyle='round', facecolor='#f8f9fa', 
+                                         edgecolor='#dee2e6', alpha=0.95))
+                
+                # ========== Panel 4: Q&A Samples ==========
+                ax_qa = fig.add_subplot(gs[1, 2:])
+                ax_qa.axis('off')
+                
+                questions = qa_data.get('questions', [])[:4]
+                
+                qa_text = "SAMPLE VQA PAIRS\n" + "=" * 50 + "\n\n"
+                
+                for i, q in enumerate(questions, 1):
+                    q_type = q.get('question_type', 'unknown')
+                    q_text = q.get('question', '')[:55]
+                    qa_text += f"Q{i} [{q_type}]:\n  {q_text}...\n"
+                    
+                    answers = q.get('answers', [])
+                    if answers:
+                        a_text = answers[0].get('text', '')[:45]
+                        qa_text += f"  A: {a_text}\n\n"
+                
+                ax_qa.text(0.02, 0.95, qa_text, transform=ax_qa.transAxes,
+                          fontsize=9, verticalalignment='top', fontfamily='monospace',
+                          bbox=dict(boxstyle='round', facecolor='lightyellow', 
+                                   edgecolor='#f0ad4e', alpha=0.95))
+                
+                # Overall title
+                fig.suptitle(f'Comprehensive Patient Analysis: {patient_id} / Study: {study_id}',
+                            fontsize=14, fontweight='bold', y=1.01)
+                
+                plt.tight_layout()
+                out_path = viz_dir / f"combined_{successful+1:02d}_{patient_id}_{study_id}.png"
+                plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
+                plt.close(fig)
+                
+                logger.info(f"  [OK] Combined visualization saved: {out_path.name}")
+                successful += 1
+                
+            except Exception as e:
+                logger.debug(f"Combined visualization failed: {e}")
+                traceback.print_exc()
+                continue
+        
+        if successful > 0:
+            logger.info(f"\n[COMBINED] {successful} combined visualizations saved to: {viz_dir}")
 
     def _visualize_scene_graphs(self, num_samples: int = 5):
         """
-        Create visual scene graph representations showing:
-        - Node structure (observations, regions, sentences)
-        - Relationships between nodes
-        - Observation properties and localizations
+        Create ACTUAL network graph visualizations using networkx.
+        
+        Shows:
+        - Observations as central nodes
+        - Regions connected to observations
+        - Entities connected to observations
+        - Relationships with edge labels
+        - Color-coded by node type and finding polarity
         """
         if not PLOTTING_AVAILABLE:
             logger.warning("Matplotlib not available, skipping scene graph visualization")
             return
         
-        logger.info(f"  Creating scene graph structure visualizations...")
+        if not NETWORKX_AVAILABLE:
+            logger.warning("networkx not available, skipping network graph visualization")
+            return
+        
+        logger.info(f"  Creating NETWORK scene graph visualizations with nodes and edges...")
         
         scene_data_dir = self.mimic_qa_path / 'scene_data'
         if not scene_data_dir.exists():
@@ -2324,8 +3583,227 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
             logger.warning("No scene graph files found")
             return
         
+        sample_files = random.sample(sg_files, min(num_samples * 3, len(sg_files)))
+        viz_dir = self.output_dir / 'scene_graph_networks'
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        
+        successful = 0
+        
+        for sg_file in sample_files:
+            if successful >= num_samples:
+                break
+            
+            try:
+                with open(sg_file) as f:
+                    sg = json.load(f)
+                
+                patient_id = sg.get('patient_id', sg_file.parts[-2])
+                study_id = sg.get('study_id', sg_file.stem.split('.')[0])
+                
+                observations = sg.get('observations', {})
+                regions = sg.get('regions', {})
+                sentences = sg.get('sentences', {})
+                
+                if not observations or len(observations) < 2:
+                    continue
+                
+                # Create networkx graph
+                G = nx.Graph()
+                
+                # Node colors and sizes
+                node_colors = []
+                node_sizes = []
+                node_labels = {}
+                
+                # Define color scheme
+                COLOR_OBS_POS = '#e74c3c'      # Red for positive findings
+                COLOR_OBS_NEG = '#27ae60'      # Green for negative findings
+                COLOR_OBS_UNK = '#f39c12'      # Orange for uncertain
+                COLOR_REGION = '#3498db'       # Blue for regions
+                COLOR_ENTITY = '#9b59b6'       # Purple for entities
+                COLOR_SENTENCE = '#1abc9c'     # Teal for sentences
+                
+                # Add observation nodes (limit to prevent overcrowding)
+                obs_list = list(observations.items())[:12]
+                
+                for obs_id, obs in obs_list:
+                    obs_name = obs.get('name', 'unknown')
+                    short_name = obs_name[:20] + '...' if len(obs_name) > 20 else obs_name
+                    G.add_node(obs_id, node_type='observation', name=short_name)
+                    node_labels[obs_id] = short_name
+                    
+                    # Color by polarity
+                    polarity = obs.get('positiveness', 'unknown')
+                    if polarity == 'pos':
+                        node_colors.append(COLOR_OBS_POS)
+                    elif polarity == 'neg':
+                        node_colors.append(COLOR_OBS_NEG)
+                    else:
+                        node_colors.append(COLOR_OBS_UNK)
+                    node_sizes.append(2000)
+                    
+                    # Add region connections
+                    obs_regions = obs.get('obs_regions', [])
+                    for region in obs_regions[:3]:  # Limit regions per observation
+                        region_node = f"R:{region}"
+                        if not G.has_node(region_node):
+                            G.add_node(region_node, node_type='region', name=region)
+                            node_labels[region_node] = region[:15]
+                            node_colors.append(COLOR_REGION)
+                            node_sizes.append(1200)
+                        G.add_edge(obs_id, region_node, relation='located_in')
+                    
+                    # Add entity connections
+                    obs_entities = obs.get('obs_entities', [])
+                    for entity in obs_entities[:3]:  # Limit entities per observation
+                        entity_node = f"E:{entity}"
+                        if not G.has_node(entity_node):
+                            G.add_node(entity_node, node_type='entity', name=entity)
+                            node_labels[entity_node] = entity[:15]
+                            node_colors.append(COLOR_ENTITY)
+                            node_sizes.append(1000)
+                        G.add_edge(obs_id, entity_node, relation='has_entity')
+                    
+                    # Add sentence connections (limit to avoid clutter)
+                    obs_sentences = obs.get('obs_sentence_ids', [])
+                    for sent_id in obs_sentences[:1]:  # Only first sentence
+                        sent_node = f"S:{sent_id}"
+                        if not G.has_node(sent_node):
+                            sent_text = sentences.get(sent_id, {}).get('sentence', '')[:25]
+                            G.add_node(sent_node, node_type='sentence', name=sent_text)
+                            node_labels[sent_node] = f'"{sent_text}..."'
+                            node_colors.append(COLOR_SENTENCE)
+                            node_sizes.append(800)
+                        G.add_edge(obs_id, sent_node, relation='mentioned_in')
+                
+                if len(G.nodes()) < 3:
+                    continue
+                
+                # Create figure with 2 panels: network graph + legend/info
+                fig = plt.figure(figsize=(20, 14))
+                gs = gridspec.GridSpec(2, 2, figure=fig, width_ratios=[2.5, 1], height_ratios=[3, 1])
+                
+                # Panel 1: Network Graph (main panel)
+                ax1 = fig.add_subplot(gs[:, 0])
+                
+                # Use spring layout for nice node distribution
+                try:
+                    pos = nx.kamada_kawai_layout(G)
+                except:
+                    pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
+                
+                # Draw edges first (with slight transparency)
+                nx.draw_networkx_edges(G, pos, ax=ax1, alpha=0.4, 
+                                       edge_color='#7f8c8d', width=1.5,
+                                       style='solid')
+                
+                # Draw nodes
+                nx.draw_networkx_nodes(G, pos, ax=ax1,
+                                       node_color=node_colors,
+                                       node_size=node_sizes,
+                                       alpha=0.9)
+                
+                # Draw labels
+                nx.draw_networkx_labels(G, pos, node_labels, ax=ax1,
+                                        font_size=7, font_weight='bold',
+                                        font_color='black')
+                
+                ax1.set_title(f'Scene Graph Network: {patient_id} / {study_id}',
+                             fontsize=14, fontweight='bold', pad=20)
+                ax1.axis('off')
+                
+                # Panel 2: Legend
+                ax2 = fig.add_subplot(gs[0, 1])
+                ax2.axis('off')
+                
+                legend_items = [
+                    (COLOR_OBS_POS, 'Positive Finding', 'o'),
+                    (COLOR_OBS_NEG, 'Negative/Normal', 'o'),
+                    (COLOR_OBS_UNK, 'Uncertain Finding', 'o'),
+                    (COLOR_REGION, 'Anatomical Region', 's'),
+                    (COLOR_ENTITY, 'Medical Entity', '^'),
+                    (COLOR_SENTENCE, 'Report Sentence', 'D'),
+                ]
+                
+                for i, (color, label, marker) in enumerate(legend_items):
+                    ax2.scatter([], [], c=color, s=200, marker=marker, label=label)
+                
+                ax2.legend(loc='upper left', fontsize=11, frameon=True, 
+                          fancybox=True, shadow=True, title='Node Types',
+                          title_fontsize=12)
+                
+                # Add statistics text
+                stats_text = f"""
+    GRAPH STATISTICS
+    ─────────────────────
+    Total Nodes: {len(G.nodes())}
+    Total Edges: {len(G.edges())}
+    
+    Observations: {len(obs_list)}
+    Regions: {sum(1 for n in G.nodes() if n.startswith('R:'))}
+    Entities: {sum(1 for n in G.nodes() if n.startswith('E:'))}
+    Sentences: {sum(1 for n in G.nodes() if n.startswith('S:'))}
+    
+    EDGE TYPES
+    ─────────────────────
+    located_in: {sum(1 for _, _, d in G.edges(data=True) if d.get('relation') == 'located_in')}
+    has_entity: {sum(1 for _, _, d in G.edges(data=True) if d.get('relation') == 'has_entity')}
+    mentioned_in: {sum(1 for _, _, d in G.edges(data=True) if d.get('relation') == 'mentioned_in')}
+                """
+                ax2.text(0.1, 0.35, stats_text, transform=ax2.transAxes,
+                        fontsize=10, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='#ecf0f1', alpha=0.9))
+                
+                # Panel 3: Clinical context + observations list
+                ax3 = fig.add_subplot(gs[1, 1])
+                ax3.axis('off')
+                
+                # Build observation summary
+                obs_summary = "OBSERVATIONS SUMMARY\n" + "─" * 30 + "\n\n"
+                for obs_id, obs in obs_list[:6]:
+                    marker = "[+]" if obs.get('positiveness') == 'pos' else "[-]" if obs.get('positiveness') == 'neg' else "[?]"
+                    name = obs.get('name', 'unknown')[:30]
+                    certainty = obs.get('certainty', 'N/A')
+                    obs_summary += f"{marker} {name}\n    Certainty: {certainty}\n\n"
+                
+                ax3.text(0.05, 0.95, obs_summary, transform=ax3.transAxes,
+                        fontsize=9, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
+                
+                plt.tight_layout()
+                out_path = viz_dir / f"network_{successful+1:02d}_{patient_id}_{study_id}.png"
+                plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
+                plt.close(fig)
+                
+                logger.info(f"  [OK] Network graph saved: {out_path.name}")
+                successful += 1
+                
+            except Exception as e:
+                logger.debug(f"Scene graph visualization failed for {sg_file}: {e}")
+                traceback.print_exc()
+                continue
+        
+        if successful > 0:
+            logger.info(f"\n[NETWORK] {successful} network graph visualizations saved to: {viz_dir}")
+        
+        # Also create the old-style summary panels
+        self._visualize_scene_graph_panels(num_samples)
+    
+    def _visualize_scene_graph_panels(self, num_samples: int = 5):
+        """
+        Create summary panel visualizations for scene graphs.
+        Shows categories, polarity, and clinical context in a clean layout.
+        """
+        scene_data_dir = self.mimic_qa_path / 'scene_data'
+        if not scene_data_dir.exists():
+            return
+        
+        sg_files = list(scene_data_dir.rglob('*.scene_graph.json'))
+        if not sg_files:
+            return
+        
         sample_files = random.sample(sg_files, min(num_samples * 2, len(sg_files)))
-        viz_dir = self.output_dir / 'scene_graph_visualizations'
+        viz_dir = self.output_dir / 'scene_graph_panels'
         viz_dir.mkdir(parents=True, exist_ok=True)
         
         successful = 0
@@ -2348,77 +3826,37 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
                 if not observations:
                     continue
                 
-                # Create multi-panel visualization
-                fig = plt.figure(figsize=(20, 12))
-                gs = gridspec.GridSpec(2, 3, figure=fig, height_ratios=[1, 1])
+                # Create clean 2x2 panel
+                fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+                fig.patch.set_facecolor('white')
                 
-                # Panel 1: Observation summary table
-                ax1 = fig.add_subplot(gs[0, 0])
-                ax1.axis('off')
-                ax1.set_title(f"[OBSERVATIONS] ({len(observations)})", fontsize=12, fontweight='bold')
-                
-                obs_text = ""
-                for i, (obs_id, obs) in enumerate(list(observations.items())[:8]):
-                    pos_marker = "[+]" if obs.get('positiveness') == 'pos' else "[-]" if obs.get('positiveness') == 'neg' else "[?]"
-                    name = obs.get('name', 'unknown')[:35]
-                    entities = ', '.join(obs.get('obs_entities', [])[:2])
-                    obs_text += f"{pos_marker} {obs_id}: {name}\n"
-                    obs_text += f"   Entities: {entities}\n"
-                    obs_text += f"   Certainty: {obs.get('certainty', 'unknown')}\n\n"
-                
-                ax1.text(0.02, 0.98, obs_text, transform=ax1.transAxes,
-                        fontsize=8, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.9))
-                
-                # Panel 2: Regions summary
-                ax2 = fig.add_subplot(gs[0, 1])
-                ax2.axis('off')
-                ax2.set_title(f"[REGIONS] ({len(regions)})", fontsize=12, fontweight='bold')
-                
-                region_text = "Region Name             | Laterality\n" + "-" * 40 + "\n"
-                for region_name, region_data in list(regions.items())[:12]:
-                    lat = region_data.get('laterality', 'N/A')
-                    region_text += f"{region_name[:24]:<24} | {lat}\n"
-                
-                ax2.text(0.02, 0.98, region_text, transform=ax2.transAxes,
-                        fontsize=8, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.9))
-                
-                # Panel 3: Report sentences
-                ax3 = fig.add_subplot(gs[0, 2])
-                ax3.axis('off')
-                ax3.set_title(f"[REPORT SENTENCES] ({len(sentences)})", fontsize=12, fontweight='bold')
-                
-                sent_text = ""
-                for sent_id, sent in list(sentences.items())[:6]:
-                    section = sent.get('section_type', 'UNKNOWN')
-                    text = sent.get('sentence', '')[:60]
-                    sent_text += f"[{section}] {sent_id}:\n  \"{text}...\"\n\n"
-                
-                ax3.text(0.02, 0.98, sent_text, transform=ax3.transAxes,
-                        fontsize=8, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='lavender', alpha=0.9))
-                
-                # Panel 4: Category/Subcategory distribution
-                ax4 = fig.add_subplot(gs[1, 0])
+                # Panel 1: Observation Categories
+                ax1 = axes[0, 0]
                 categories = Counter()
                 for obs in observations.values():
                     for cat in obs.get('obs_categories', []):
                         categories[cat] += 1
                 
                 if categories:
-                    cats = list(categories.keys())[:6]
+                    cats = list(categories.keys())[:8]
                     counts = [categories[c] for c in cats]
-                    colors = plt.cm.Set3(np.linspace(0, 1, len(cats)))
-                    ax4.barh(cats, counts, color=colors)
-                    ax4.set_xlabel('Count')
-                    ax4.set_title('Observation Categories', fontsize=10)
+                    colors = plt.cm.viridis(np.linspace(0.2, 0.8, len(cats)))
+                    bars = ax1.barh(cats, counts, color=colors, edgecolor='white', linewidth=0.5)
+                    ax1.set_xlabel('Count', fontsize=10)
+                    ax1.set_title('Observation Categories', fontsize=12, fontweight='bold')
+                    ax1.spines['top'].set_visible(False)
+                    ax1.spines['right'].set_visible(False)
+                    
+                    # Add count labels
+                    for bar, count in zip(bars, counts):
+                        ax1.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2,
+                                str(count), va='center', fontsize=9)
                 else:
-                    ax4.text(0.5, 0.5, "No categories", ha='center', va='center')
-                    ax4.set_title('Observation Categories', fontsize=10)
+                    ax1.text(0.5, 0.5, "No categories", ha='center', va='center', fontsize=12)
+                    ax1.set_title('Observation Categories', fontsize=12, fontweight='bold')
                 
-                # Panel 5: Polarity pie chart
-                ax5 = fig.add_subplot(gs[1, 1])
+                # Panel 2: Finding Polarity (Donut Chart)
+                ax2 = axes[0, 1]
                 polarity = Counter()
                 for obs in observations.values():
                     polarity[obs.get('positiveness', 'unknown')] += 1
@@ -2426,50 +3864,84 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
                 if polarity:
                     labels = list(polarity.keys())
                     sizes = list(polarity.values())
-                    color_map = {'pos': '#e74c3c', 'neg': '#2ecc71', 'unknown': '#95a5a6'}
+                    color_map = {'pos': '#e74c3c', 'neg': '#27ae60', 'unknown': '#95a5a6'}
                     colors = [color_map.get(l, '#3498db') for l in labels]
-                    ax5.pie(sizes, labels=labels, autopct='%1.0f%%', colors=colors,
-                           explode=[0.05] * len(labels))
-                    ax5.set_title('Finding Polarity', fontsize=10)
+                    
+                    # Donut chart
+                    wedges, texts, autotexts = ax2.pie(
+                        sizes, labels=labels, autopct='%1.0f%%',
+                        colors=colors, explode=[0.02] * len(labels),
+                        wedgeprops=dict(width=0.6, edgecolor='white'),
+                        textprops={'fontsize': 10}
+                    )
+                    ax2.set_title('Finding Polarity Distribution', fontsize=12, fontweight='bold')
+                    
+                    # Center text
+                    total = sum(sizes)
+                    ax2.text(0, 0, f'{total}\nfindings', ha='center', va='center', 
+                            fontsize=14, fontweight='bold')
                 
-                # Panel 6: Indication/Clinical info
-                ax6 = fig.add_subplot(gs[1, 2])
-                ax6.axis('off')
-                ax6.set_title("[CLINICAL CONTEXT]", fontsize=12, fontweight='bold')
+                # Panel 3: Region Coverage
+                ax3 = axes[1, 0]
+                region_counts = Counter()
+                for obs in observations.values():
+                    for region in obs.get('obs_regions', []):
+                        region_counts[region] += 1
+                
+                if region_counts:
+                    top_regions = region_counts.most_common(10)
+                    regions_list = [r[0] for r in top_regions]
+                    counts = [r[1] for r in top_regions]
+                    
+                    colors = plt.cm.Blues(np.linspace(0.4, 0.9, len(regions_list)))
+                    bars = ax3.barh(regions_list[::-1], counts[::-1], color=colors[::-1], 
+                                   edgecolor='white', linewidth=0.5)
+                    ax3.set_xlabel('Mention Count', fontsize=10)
+                    ax3.set_title('Top Anatomical Regions', fontsize=12, fontweight='bold')
+                    ax3.spines['top'].set_visible(False)
+                    ax3.spines['right'].set_visible(False)
+                else:
+                    ax3.text(0.5, 0.5, "No regions", ha='center', va='center', fontsize=12)
+                    ax3.set_title('Top Anatomical Regions', fontsize=12, fontweight='bold')
+                
+                # Panel 4: Clinical Summary Text
+                ax4 = axes[1, 1]
+                ax4.axis('off')
                 
                 indication = sg.get('indication', {})
-                clinical_text = ""
+                
+                summary_text = f"CLINICAL SUMMARY\n{'─' * 40}\n\n"
+                summary_text += f"Patient ID: {patient_id}\n"
+                summary_text += f"Study ID: {study_id}\n\n"
+                summary_text += f"Observations: {len(observations)}\n"
+                summary_text += f"Regions: {len(regions)}\n"
+                summary_text += f"Report Sentences: {len(sentences)}\n\n"
+                
                 if indication:
                     if indication.get('indication_summary'):
-                        clinical_text += f"Summary:\n  {indication['indication_summary'][:100]}...\n\n"
+                        summary_text += f"Indication:\n  {indication['indication_summary'][:100]}...\n\n"
                     if indication.get('patient_info'):
-                        clinical_text += f"Patient Info:\n  {indication['patient_info'][:80]}\n\n"
-                    if indication.get('evaluation'):
-                        clinical_text += f"Evaluation:\n  {indication['evaluation'][:80]}\n"
-                else:
-                    clinical_text = "No indication information available"
+                        summary_text += f"Patient Info:\n  {indication['patient_info'][:80]}\n"
                 
-                ax6.text(0.02, 0.98, clinical_text, transform=ax6.transAxes,
-                        fontsize=9, verticalalignment='top', fontfamily='monospace',
-                        bbox=dict(boxstyle='round', facecolor='honeydew', alpha=0.9))
+                ax4.text(0.05, 0.95, summary_text, transform=ax4.transAxes,
+                        fontsize=11, verticalalignment='top', fontfamily='monospace',
+                        bbox=dict(boxstyle='round', facecolor='#f8f9fa', 
+                                 edgecolor='#dee2e6', alpha=0.9))
                 
-                # Overall title
-                fig.suptitle(f"Scene Graph: {patient_id} / {study_id}", fontsize=14, fontweight='bold')
+                fig.suptitle(f'Scene Graph Analysis: {patient_id} / {study_id}', 
+                            fontsize=14, fontweight='bold', y=1.02)
                 
                 plt.tight_layout()
-                out_path = viz_dir / f"scene_graph_{successful+1:02d}_{patient_id}_{study_id}.png"
-                plt.savefig(out_path, dpi=150, bbox_inches='tight')
+                out_path = viz_dir / f"panel_{successful+1:02d}_{patient_id}_{study_id}.png"
+                plt.savefig(out_path, dpi=150, bbox_inches='tight', facecolor='white')
                 plt.close(fig)
                 
-                logger.info(f"  ✓ Saved: {out_path.name}")
+                logger.info(f"  [OK] Panel saved: {out_path.name}")
                 successful += 1
                 
             except Exception as e:
-                logger.debug(f"Scene graph visualization failed for {sg_file}: {e}")
+                logger.debug(f"Panel visualization failed for {sg_file}: {e}")
                 continue
-        
-        if successful > 0:
-            logger.info(f"\n🔗 {successful} scene graph visualizations saved to: {viz_dir}")
 
 
 def main():
