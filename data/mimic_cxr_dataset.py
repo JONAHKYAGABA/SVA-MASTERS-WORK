@@ -576,13 +576,23 @@ class MIMICCXRVQADataset(Dataset):
                         
                         # Process each question
                         questions = qa_data.get('questions', [])
+                        
+                        # Log first question structure once for debugging
+                        if files_scanned == 1 and len(questions) > 0:
+                            first_q_keys = list(questions[0].keys())
+                            logger.info(f"  Sample question keys: {first_q_keys[:10]}")
+                        
                         for q in questions:
-                            # Quality filter based on question_quality
-                            q_quality = q.get('question_quality', {})
-                            quality_rating = q_quality.get('overall', 'U') if isinstance(q_quality, dict) else 'U'
-                            
-                            # Quality grade comparison (A++ > A+ > A > B)
-                            if self.quality_grade:
+                            # Quality filter (skip if quality_grade is empty/None/"all")
+                            if self.quality_grade and self.quality_grade.lower() not in ('', 'all', 'none'):
+                                q_quality = q.get('question_quality', q.get('quality', {}))
+                                if isinstance(q_quality, dict):
+                                    quality_rating = q_quality.get('overall', q_quality.get('grade', 'B'))
+                                elif isinstance(q_quality, str):
+                                    quality_rating = q_quality
+                                else:
+                                    quality_rating = 'B'  # Default to B if no quality info
+                                
                                 if not self._meets_quality_grade(quality_rating, self.quality_grade):
                                     skipped_quality += 1
                                     continue

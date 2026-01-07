@@ -46,8 +46,9 @@ data:
   mimic_ext_cxr_qba_path: "/home/brian/scenegraphdata/physionet.org/files/mimic-ext-cxr-qba/1.0.0"
   chexpert_labels_path: "/home/brian/dataset/mimic-cxr-2.0.0-chexpert.csv.gz"
   
-  # PRE-TRAINING: Use B grade or better (31.2M pairs)
-  quality_grade: "B"
+  # PRE-TRAINING: Use all data (quality filtering disabled for pretraining)
+  # Set to "A" for fine-tuning, "all" or "" to include everything
+  quality_grade: "all"
   view_filter: "frontal_only"
   question_types: null  # All question types
   
