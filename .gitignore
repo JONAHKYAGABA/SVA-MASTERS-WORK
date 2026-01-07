@@ -44,8 +44,13 @@ dist/
 .vscode
 .python-version
 
-# project dirs
-data/*
+# project dirs - ignore data files but keep Python source
+data/*.csv
+data/*.json
+data/*.parquet
+data/*.zip
+data/*.h5
+!data/*.py
 checkpoints/*
 
 
