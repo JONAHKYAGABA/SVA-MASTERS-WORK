@@ -27,9 +27,15 @@ import logging
 from pathlib import Path
 from typing import Dict, Any
 
-# Add project root to path
-project_root = Path(__file__).parent.parent
+# Add project root to path - handle both direct run and module run
+script_dir = Path(__file__).resolve().parent
+project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
+os.chdir(project_root)  # Change to project root for relative imports
+
+# Debug path info
+print(f"Project root: {project_root}")
+print(f"Python path includes: {project_root}")
 
 import torch
 import numpy as np
