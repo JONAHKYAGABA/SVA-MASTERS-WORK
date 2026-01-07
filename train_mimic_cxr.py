@@ -539,10 +539,15 @@ def train_epoch(
         chexpert_labels = batch['chexpert_labels'].to(device)
         chexpert_mask = batch['chexpert_mask'].to(device)
         
+        # Image dimensions for bbox normalization (from collate_fn)
+        image_widths = batch.get('image_widths', torch.full((images.shape[0],), 224, dtype=torch.long)).to(device) if images is not None else None
+        image_heights = batch.get('image_heights', torch.full((images.shape[0],), 224, dtype=torch.long)).to(device) if images is not None else None
+        
         if images is None:
             continue
         
-        # Prepare VQA targets
+        # Prepare VQA targets - all heads get the same answer_idx
+        # The loss function routes to correct head based on question_type
         vqa_targets = {
             'binary': answer_idx,
             'category': answer_idx,
@@ -558,7 +563,9 @@ def train_epoch(
                 attention_mask=attention_mask,
                 scene_graphs=scene_graphs,
                 token_type_ids=token_type_ids,
-                question_types=question_types
+                question_types=question_types,
+                image_widths=image_widths,
+                image_heights=image_heights
             )
             
             loss, loss_dict = criterion(
@@ -584,7 +591,9 @@ def train_epoch(
                         attention_mask=attention_mask,
                         scene_graphs=scene_graphs,
                         token_type_ids=token_type_ids,
-                        question_types=question_types
+                        question_types=question_types,
+                        image_widths=image_widths,
+                        image_heights=image_heights
                     )
                     
                     loss, loss_dict = criterion(
@@ -608,7 +617,9 @@ def train_epoch(
                     attention_mask=attention_mask,
                     scene_graphs=scene_graphs,
                     token_type_ids=token_type_ids,
-                    question_types=question_types
+                    question_types=question_types,
+                    image_widths=image_widths,
+                    image_heights=image_heights
                 )
                 
                 loss, loss_dict = criterion(

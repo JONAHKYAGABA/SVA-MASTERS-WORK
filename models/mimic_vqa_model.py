@@ -681,7 +681,9 @@ class MIMICCXRVQAModel(nn.Module):
         attention_mask: torch.Tensor,
         scene_graphs: List[Dict[str, Any]],
         token_type_ids: Optional[torch.Tensor] = None,
-        question_types: Optional[List[str]] = None
+        question_types: Optional[List[str]] = None,
+        image_widths: Optional[torch.Tensor] = None,
+        image_heights: Optional[torch.Tensor] = None
     ) -> MIMICVQAOutput:
         """
         Forward pass.
@@ -690,15 +692,26 @@ class MIMICCXRVQAModel(nn.Module):
             images: (B, 3, H, W) input images
             input_ids: (B, L) tokenized questions
             attention_mask: (B, L) attention mask for text
-            scene_graphs: List of scene graph dicts
+            scene_graphs: List of scene graph dicts with keys:
+                - bboxes: (N, 4) normalized bounding boxes
+                - region_ids: (N,) region embedding indices
+                - entity_ids: (N,) entity embedding indices
+                - positiveness: (N,) binary polarity indicators
+                - num_objects: int number of observations
             token_type_ids: (B, L) optional token type IDs
-            question_types: List of question type strings
+            question_types: List of question type strings (e.g., "D02_has_finding")
+            image_widths: (B,) original image widths (for denormalization if needed)
+            image_heights: (B,) original image heights (for denormalization if needed)
             
         Returns:
             MIMICVQAOutput with vqa_logits, chexpert_logits, pooled_output
         """
         device = images.device
         batch_size = images.shape[0]
+        
+        # Store image dimensions for potential downstream use
+        self._image_widths = image_widths
+        self._image_heights = image_heights
         
         # Extract visual features
         # Get bboxes from scene graphs

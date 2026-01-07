@@ -1,0 +1,129 @@
+# MIMIC-CXR VQA Fine-tuning Configuration
+# ==========================================
+# Phase 2: Fine-tuning on A-grade data (7.5M pairs)
+#
+# This configuration loads from a pretrained checkpoint and
+# fine-tunes on high-quality A-grade data.
+#
+# Usage:
+#   deepspeed --num_gpus=4 train_mimic_cxr.py \
+#     --config configs/finetune_config.yaml \
+#     --deepspeed_config configs/deepspeed_config.json \
+#     --resume_from_checkpoint ./checkpoints/mimic-cxr-vqa-pretrain/best_model \
+#     --phase finetune
+
+model:
+  visual_backbone: "convnext_base"
+  text_encoder: "emilyalsentzer/Bio_ClinicalBERT"
+  visual_feature_dim: 512
+  scene_graph_dim: 134
+  visual_embedding_dim: 646
+  hidden_size: 768
+  intermediate_size: 3072
+  num_hidden_layers: 6
+  num_attention_heads: 12
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  sim_layers: 2
+  
+  num_regions: 310
+  num_entities: 237
+  region_embedding_dim: 64
+  entity_embedding_dim: 64
+  
+  num_binary_classes: 2
+  num_category_classes: 14
+  num_region_classes: 26
+  num_severity_classes: 4
+  
+  max_question_length: 128
+  vocab_size: 30522
+
+data:
+  # GCP Server paths
+  mimic_cxr_jpg_path: "/home/brian/dataset"
+  mimic_ext_cxr_qba_path: "/home/brian/scenegraphdata/physionet.org/files/mimic-ext-cxr-qba/1.0.0"
+  chexpert_labels_path: "/home/brian/dataset/mimic-cxr-2.0.0-chexpert.csv.gz"
+  
+  # FINE-TUNING: Use A grade or better (7.5M pairs)
+  quality_grade: "A"
+  view_filter: "frontal_only"
+  question_types: null
+  
+  # Use exports folder for pre-filtered data
+  use_exports: true
+  export_grade: "A_frontal"  # Uses exports/A_frontal/ if available
+  
+  image_size: 224
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+training:
+  output_dir: "./checkpoints/mimic-cxr-vqa-finetune"
+  
+  phase: "finetune"
+  
+  # Batch settings
+  batch_size_per_gpu: 16
+  gradient_accumulation_steps: 4
+  
+  # Fine-tuning: 10-20 epochs
+  num_epochs: 20
+  
+  # Lower learning rate for fine-tuning
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  max_grad_norm: 1.0
+  
+  fp16: true
+  gradient_checkpointing: true
+  
+  # Loss weights - balanced for fine-tuning
+  vqa_loss_weight: 1.0
+  chexpert_loss_weight: 0.3
+  binary_head_weight: 1.0
+  category_head_weight: 0.5
+  region_head_weight: 0.5
+  severity_head_weight: 0.3
+  
+  # More frequent checkpointing for fine-tuning
+  logging_steps: 100
+  save_steps: 5000
+  save_total_limit: 5
+  eval_steps: 2500
+  
+  # Best model selection
+  metric_for_best_model: "overall_accuracy"
+  greater_is_better: true
+  early_stopping_patience: 5
+  
+  # DataLoader
+  dataloader_num_workers: 32
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 4
+  
+  # Hugging Face Hub
+  hub_model_id: ""
+  hub_private_repo: true
+  push_to_hub_strategy: "best"  # Only push best model
+  
+  seed: 42
+
+wandb:
+  enabled: true
+  project: "mimic-cxr-vqa"
+  entity: ""
+  name: "finetune-a-grade"
+  group: "finetuning"
+  tags: ["ssg-vqa", "mimic-cxr", "finetune", "a-grade", "gcp-l4"]
+  notes: "Fine-tuning on A-grade data (7.5M pairs) from pretrained checkpoint"
+  watch_model: true  # Enable for fine-tuning
+  watch_log_freq: 1000
+  log_model: true
+
+deepspeed:
+  enabled: true
+  config_path: "configs/deepspeed_config.json"
+  stage: 2
+

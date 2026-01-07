@@ -149,8 +149,16 @@ class MultiTaskLoss(nn.Module):
         """
         Map question types to answer heads.
         
+        Uses the same QUESTION_TYPE_MAP as the dataset to ensure consistency.
         Returns dict mapping head names to sample indices.
         """
+        # Import the authoritative mapping from the dataset module
+        try:
+            from data.mimic_cxr_dataset import QUESTION_TYPE_MAP
+        except ImportError:
+            # Fallback mapping if import fails
+            QUESTION_TYPE_MAP = self._get_fallback_question_type_map()
+        
         head_indices = {
             'binary': [],
             'category': [],
@@ -158,22 +166,63 @@ class MultiTaskLoss(nn.Module):
             'severity': [],
         }
         
-        binary_types = {'is_abnormal', 'is_normal', 'has_finding', 'has_device', 'is_abnormal_region'}
-        category_types = {'describe_finding', 'has_finding', 'what_finding'}
-        region_types = {'where_is_finding', 'describe_region', 'which_region'}
-        severity_types = {'how_severe'}
-        
         for idx, q_type in enumerate(question_types):
-            if q_type in binary_types:
-                head_indices['binary'].append(idx)
-            if q_type in category_types:
-                head_indices['category'].append(idx)
-            if q_type in region_types:
-                head_indices['region'].append(idx)
-            if q_type in severity_types:
-                head_indices['severity'].append(idx)
+            # Look up head from the mapping
+            head = QUESTION_TYPE_MAP.get(q_type)
+            
+            # If not found, try to infer from question type name
+            if head is None:
+                q_lower = q_type.lower()
+                if any(x in q_lower for x in ['is_abnormal', 'is_normal', 'has_']):
+                    head = 'binary'
+                elif any(x in q_lower for x in ['where_is', 'describe_region']):
+                    head = 'region'
+                elif 'severe' in q_lower:
+                    head = 'severity'
+                elif any(x in q_lower for x in ['describe_', 'indication']):
+                    head = 'category'
+                else:
+                    head = 'binary'  # Default
+            
+            if head in head_indices:
+                head_indices[head].append(idx)
         
         return head_indices
+    
+    def _get_fallback_question_type_map(self) -> Dict[str, str]:
+        """Fallback question type mapping if import fails."""
+        return {
+            # MIMIC-Ext-CXR-QBA Question Types
+            'C03_is_abnormal_region': 'binary',
+            'C04_is_normal_region': 'binary',
+            'C08_has_region_device': 'binary',
+            'D02_has_finding': 'binary',
+            'D06_has_device': 'binary',
+            'B10_is_abnormal_subcat': 'binary',
+            'B11_is_normal_subcat': 'binary',
+            'B13_has_devices': 'binary',
+            'C01_describe_region': 'region',
+            'C02_describe_abnormal_region': 'region',
+            'D03_where_is_finding': 'region',
+            'D07_where_is_device': 'region',
+            'D04_how_severe_is_finding': 'severity',
+            'D01_describe_finding': 'category',
+            'D05_describe_device': 'category',
+            'C07_describe_region_device': 'category',
+            'B08_describe_subcat': 'category',
+            'B09_describe_abnormal_subcat': 'category',
+            'B12_describe_device': 'category',
+            'A_indication': 'category',
+            # Legacy mappings
+            'is_abnormal': 'binary',
+            'is_normal': 'binary',
+            'has_finding': 'binary',
+            'has_device': 'binary',
+            'describe_finding': 'category',
+            'where_is_finding': 'region',
+            'describe_region': 'region',
+            'how_severe': 'severity',
+        }
 
 
 class FocalLoss(nn.Module):
