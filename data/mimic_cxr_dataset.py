@@ -434,26 +434,25 @@ class MIMICCXRVQADataset(Dataset):
                     df = pd.read_csv(metadata_file, compression='gzip')
                 else:
                     df = pd.read_csv(metadata_file)
-                logger.info(f"Loaded metadata: {len(df)} images")
+                
+                # Create indexed lookup dict for O(1) access (MUCH faster than DataFrame scans)
+                self._dicom_to_view = {}
+                for _, row in df.iterrows():
+                    dicom_id = row.get('dicom_id')
+                    if dicom_id:
+                        self._dicom_to_view[str(dicom_id)] = row.get('ViewPosition')
+                
+                logger.info(f"Loaded metadata: {len(df)} images (indexed for fast lookup)")
                 return df
             except Exception as e:
                 logger.warning(f"Could not load metadata: {e}")
         
+        self._dicom_to_view = {}
         return None
     
     def _get_view_position(self, dicom_id: str) -> Optional[str]:
-        """Get ViewPosition for a DICOM ID from metadata."""
-        if self.metadata_df is None:
-            return None
-        
-        try:
-            row = self.metadata_df[self.metadata_df['dicom_id'] == dicom_id]
-            if len(row) > 0:
-                return row.iloc[0].get('ViewPosition', None)
-        except Exception:
-            pass
-        
-        return None
+        """Get ViewPosition for a DICOM ID from metadata (O(1) lookup)."""
+        return self._dicom_to_view.get(str(dicom_id))
     
     def _is_valid_view(self, view_position: Optional[str]) -> bool:
         """Check if view position matches filter criteria."""
@@ -502,7 +501,8 @@ class MIMICCXRVQADataset(Dataset):
             # Map split names (MIMIC uses 'validate' not 'val')
             split_name = 'validate' if self.split == 'val' else self.split
             splits_df = splits_df[splits_df['split'] == split_name]
-            valid_studies = set(zip(splits_df['subject_id'], splits_df['study_id']))
+            valid_studies = set(zip(splits_df['subject_id'].astype(int), splits_df['study_id'].astype(int)))
+            logger.info(f"Found {len(valid_studies)} studies in '{split_name}' split")
         else:
             valid_studies = None
         
@@ -531,15 +531,19 @@ class MIMICCXRVQADataset(Dataset):
         
         # Iterate through patient directories
         # Structure: qa/p{XX}/p{subject_id}/s{study_id}.qa.json
-        for p_group in qa_dir.iterdir():
-            if not p_group.is_dir() or not p_group.name.startswith('p'):
-                continue
-                
+        p_groups = [p for p in qa_dir.iterdir() if p.is_dir() and p.name.startswith('p')]
+        logger.info(f"Scanning {len(p_groups)} patient groups for QA files...")
+        
+        files_scanned = 0
+        for p_group in p_groups:
             for patient_dir in p_group.iterdir():
                 if not patient_dir.is_dir() or not patient_dir.name.startswith('p'):
                     continue
                 
                 for qa_file in patient_dir.glob('s*.qa.json'):
+                    files_scanned += 1
+                    if files_scanned % 10000 == 0:
+                        logger.info(f"  Scanned {files_scanned} files, found {len(samples)} samples...")
                     try:
                         # Parse IDs from path
                         # patient_dir.name = "p10000032" -> subject_id = 10000032
