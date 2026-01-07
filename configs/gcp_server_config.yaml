@@ -1,0 +1,182 @@
+# GCP Server Configuration for MIMIC-CXR VQA Training
+# =====================================================
+# Pre-configured for your GCP instance with 4x NVIDIA L4 GPUs
+# 
+# Dataset paths are set for your actual server structure:
+#   MIMIC-CXR-JPG: ~/dataset/
+#   MIMIC-Ext-CXR-QBA: ~/scenegraphdata/physionet.org/files/mimic-ext-cxr-qba/1.0.0/
+#
+# IMPORTANT: Run setup_data.py first to extract qa.zip and scene_data.zip!
+#   python setup_data.py \
+#     --mimic_cxr_path ~/dataset \
+#     --mimic_qa_path ~/scenegraphdata/physionet.org/files/mimic-ext-cxr-qba/1.0.0
+
+model:
+  # Visual backbone
+  visual_backbone: "convnext_base"
+  text_encoder: "emilyalsentzer/Bio_ClinicalBERT"
+  
+  # Feature dimensions
+  visual_feature_dim: 512
+  scene_graph_dim: 134  # 6 bbox + 64 region + 64 entity
+  visual_embedding_dim: 646
+  
+  # Architecture
+  hidden_size: 768
+  intermediate_size: 3072
+  num_hidden_layers: 6
+  num_attention_heads: 12
+  hidden_dropout_prob: 0.1
+  attention_probs_dropout_prob: 0.1
+  
+  # Scene-Embedded Interaction Module
+  sim_layers: 2
+  
+  # Scene graph vocabulary
+  num_regions: 310
+  num_entities: 237
+  region_embedding_dim: 64
+  entity_embedding_dim: 64
+  
+  # Answer heads
+  num_binary_classes: 2
+  num_category_classes: 14
+  num_region_classes: 26
+  num_severity_classes: 4
+  
+  # Text processing
+  max_question_length: 128
+  vocab_size: 30522
+
+data:
+  # ================================================================
+  # DATASET PATHS - Configured for your GCP server structure
+  # ================================================================
+  mimic_cxr_jpg_path: "/home/brian/dataset"
+  mimic_ext_cxr_qba_path: "/home/brian/scenegraphdata/physionet.org/files/mimic-ext-cxr-qba/1.0.0"
+  
+  # CheXpert labels (auto-detected from mimic_cxr_jpg_path)
+  chexpert_labels_path: "/home/brian/dataset/mimic-cxr-2.0.0-chexpert.csv.gz"
+  test_labels_csv_path: "/home/brian/dataset/mimic-cxr-2.1.0-test-set-labeled.csv"
+  
+  # Quality filtering
+  quality_grade: "A"  # A for fine-tuning, B for pre-training
+  view_filter: "frontal_only"  # frontal_only, lateral_only, all
+  
+  # Question types (null = all)
+  question_types: null
+  
+  # Use pre-exported filtered data (faster loading)
+  use_exports: false
+  
+  # Image preprocessing
+  image_size: 224
+  normalize_mean: [0.485, 0.456, 0.406]
+  normalize_std: [0.229, 0.224, 0.225]
+
+training:
+  # Output
+  output_dir: "./checkpoints/mimic-cxr-vqa"
+  
+  # ========================================
+  # BATCH SIZE & GRADIENT ACCUMULATION
+  # Per methodology Section 11.2:
+  # - batch_size_per_gpu: 16
+  # - gradient_accumulation_steps: 4
+  # - 4 GPUs -> effective_batch_size = 16 * 4 * 4 = 256
+  # ========================================
+  batch_size_per_gpu: 16
+  gradient_accumulation_steps: 4
+  
+  # Learning rate (methodology: 5e-5 with cosine warmup)
+  learning_rate: 5.0e-5
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  max_grad_norm: 1.0
+  
+  # Epochs
+  num_epochs: 20
+  
+  # ========================================
+  # OPTIMIZATION FLAGS (methodology Section 11.1)
+  # - Mixed Precision: 1.5-2x speedup
+  # - Gradient Checkpointing: enables 2x batch
+  # ========================================
+  fp16: true
+  gradient_checkpointing: true
+  
+  # Loss weights
+  vqa_loss_weight: 1.0
+  chexpert_loss_weight: 0.3
+  binary_head_weight: 1.0
+  category_head_weight: 0.5
+  region_head_weight: 0.5
+  severity_head_weight: 0.3
+  
+  # Logging and saving
+  logging_steps: 100
+  save_steps: 5000
+  save_total_limit: 5
+  eval_steps: 2500
+  
+  # Best model tracking
+  metric_for_best_model: "accuracy"
+  greater_is_better: true
+  
+  # Early stopping
+  early_stopping_patience: 5
+  
+  # ========================================
+  # DATA LOADING (methodology Section 11.2)
+  # Optimized for 4x L4 GPUs with 24GB each
+  # - num_workers: 12 (3 per GPU for 4 GPUs)
+  # - pin_memory: true (faster GPU transfer)
+  # - prefetch_factor: 4 (preload batches)
+  # ========================================
+  dataloader_num_workers: 12
+  dataloader_pin_memory: true
+  dataloader_prefetch_factor: 4
+  
+  # Debug mode (set to small number for testing, null for full training)
+  max_samples_per_split: null
+  
+  # Hugging Face Hub (optional - set your model ID)
+  hub_model_id: ""  # e.g., "your-username/mimic-cxr-vqa-ssg"
+  hub_private_repo: true
+  push_to_hub_strategy: "best"
+  
+  # Reproducibility
+  seed: 42
+
+wandb:
+  enabled: true
+  project: "mimic-cxr-vqa"
+  entity: ""  # Set via WANDB_ENTITY env var or here
+  name: ""  # Auto-generated if empty
+  group: "experiments"
+  tags: ["ssg-vqa", "mimic-cxr", "medical-vqa", "gcp-l4"]
+  notes: "SSG-VQA-Net on GCP with 4x L4 GPUs"
+  watch_model: false
+  watch_log_freq: 1000
+  log_model: true
+
+# ========================================
+# DEEPSPEED CONFIGURATION (methodology Section 11)
+# ZeRO Stage 2: 30-40% memory savings
+# ========================================
+deepspeed:
+  enabled: true
+  config_path: "configs/deepspeed_config.json"
+  stage: 2
+
+# ========================================
+# HARDWARE AUTO-OPTIMIZATION
+# Detects your 4x L4 GPUs and optimizes settings
+# ========================================
+hardware_optimization:
+  auto_optimize: true
+  model_memory_footprint_gb: 8.0  # Estimated model size
+  min_batch_size_per_gpu: 4
+  max_grad_accum_steps: 16
+
