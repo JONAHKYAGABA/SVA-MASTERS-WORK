@@ -58,6 +58,7 @@ class DataConfig:
     mimic_cxr_jpg_path: str = "/path/to/MIMIC-CXR-JPG"
     mimic_ext_cxr_qba_path: str = "/path/to/MIMIC-Ext-CXR-QBA"
     chexpert_labels_path: str = ""  # Optional: path to chexpert.csv
+    test_labels_csv_path: str = ""  # Optional: path to test labels
     
     # Quality filtering
     quality_grade: str = "A"  # A for fine-tuning, B for pre-training
@@ -65,6 +66,10 @@ class DataConfig:
     
     # Question type filtering (None = all types)
     question_types: Optional[List[str]] = None
+    
+    # Pre-filtered exports (faster loading for large datasets)
+    use_exports: bool = False  # Use exports/ folder with pre-filtered data
+    export_grade: str = ""  # e.g., "B_frontal" for exports/B_frontal/
     
     # Image preprocessing
     image_size: int = 224
@@ -77,6 +82,9 @@ class TrainingConfig:
     """Training configuration."""
     # Output
     output_dir: str = "./checkpoints/mimic-cxr-vqa"
+    
+    # Training phase (pretrain or finetune)
+    phase: str = "pretrain"  # pretrain or finetune
     
     # Batch size
     batch_size_per_gpu: int = 16
