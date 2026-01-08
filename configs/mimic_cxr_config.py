@@ -71,6 +71,9 @@ class DataConfig:
     use_exports: bool = False  # Use exports/ folder with pre-filtered data
     export_grade: str = ""  # e.g., "B_frontal" for exports/B_frontal/
     
+    # Caching for distributed training (prevents NCCL timeout)
+    cache_dir: str = ".cache/dataset_samples"  # Cache directory for samples
+    
     # Image preprocessing
     image_size: int = 224
     normalize_mean: List[float] = field(default_factory=lambda: [0.485, 0.456, 0.406])

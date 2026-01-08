@@ -56,6 +56,10 @@ data:
   use_exports: true
   export_grade: "B_frontal"  # Uses exports/B_frontal/ if available
   
+  # Cache directory for distributed training (prevents NCCL timeout)
+  # Run: python scripts/prebuild_cache.py --config configs/pretrain_config.yaml
+  cache_dir: ".cache/dataset_samples"
+  
   # Image processing
   image_size: 224
   normalize_mean: [0.485, 0.456, 0.406]

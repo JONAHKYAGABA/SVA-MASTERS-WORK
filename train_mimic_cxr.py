@@ -963,9 +963,12 @@ def main(args):
         with open(os.path.join(config.training.output_dir, 'config.json'), 'w') as f:
             json.dump(config.to_dict(), f, indent=2)
     
-    # Load datasets
+    # Load datasets with caching support
+    # Cache directory for instant loading on distributed training
+    cache_dir = getattr(config.data, 'cache_dir', '.cache/dataset_samples')
+    
     if is_main_process(local_rank):
-        logger.info("Loading datasets...")
+        logger.info("Loading datasets (using cache if available)...")
     
     train_dataset = MIMICCXRVQADataset(
         mimic_cxr_path=config.data.mimic_cxr_jpg_path,
@@ -977,8 +980,14 @@ def main(args):
         view_filter=config.data.view_filter,
         question_types=config.data.question_types if config.data.question_types else None,
         chexpert_labels_path=config.data.chexpert_labels_path if config.data.chexpert_labels_path else None,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        cache_dir=cache_dir,
+        use_cache=True,
     )
+    
+    # Barrier to ensure all processes have loaded/cached train data
+    if is_distributed:
+        dist.barrier()
     
     val_dataset = MIMICCXRVQADataset(
         mimic_cxr_path=config.data.mimic_cxr_jpg_path,
@@ -990,8 +999,14 @@ def main(args):
         view_filter=config.data.view_filter,
         question_types=config.data.question_types if config.data.question_types else None,
         chexpert_labels_path=config.data.chexpert_labels_path if config.data.chexpert_labels_path else None,
-        max_samples=args.max_samples // 10 if args.max_samples else None
+        max_samples=args.max_samples // 10 if args.max_samples else None,
+        cache_dir=cache_dir,
+        use_cache=True,
     )
+    
+    # Barrier to ensure all processes have loaded/cached val data
+    if is_distributed:
+        dist.barrier()
     
     if is_main_process(local_rank):
         logger.info(f"Train samples: {len(train_dataset)}")

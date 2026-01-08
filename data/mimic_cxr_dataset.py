@@ -12,6 +12,8 @@ Based on MIMIC_CXR_VQA_ANALYSIS.md specifications.
 import os
 import json
 import logging
+import hashlib
+import pickle
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -24,6 +26,9 @@ import torchvision.transforms as transforms
 from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
+
+# Default cache directory
+DEFAULT_CACHE_DIR = Path('.cache/dataset_samples')
 
 
 # CheXpert categories
@@ -364,7 +369,10 @@ class MIMICCXRVQADataset(Dataset):
         chexpert_labels_path: Optional[str] = None,
         max_samples: Optional[int] = None,
         transform: Optional[Any] = None,
-        use_exports: bool = False  # Use pre-filtered exports folder
+        use_exports: bool = False,  # Use pre-filtered exports folder
+        cache_dir: Optional[str] = None,  # Cache directory for samples
+        use_cache: bool = True,  # Whether to use caching
+        force_rebuild_cache: bool = False  # Force rebuild even if cache exists
     ):
         self.mimic_cxr_path = Path(mimic_cxr_path)
         self.mimic_qa_path = Path(mimic_qa_path)
@@ -375,6 +383,12 @@ class MIMICCXRVQADataset(Dataset):
         self.question_types = question_types
         self.max_samples = max_samples
         self.use_exports = use_exports
+        self.use_cache = use_cache
+        self.force_rebuild_cache = force_rebuild_cache
+        
+        # Setup cache directory
+        self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
@@ -416,8 +430,8 @@ class MIMICCXRVQADataset(Dataset):
                 self.sg_processor.load_vocab(str(dataset_info_path))
                 break
         
-        # Load samples
-        self.samples = self._load_samples()
+        # Load samples (with caching support)
+        self.samples = self._load_samples_with_cache()
         
         logger.info(f"Loaded {len(self.samples)} samples for {split}")
     
@@ -453,6 +467,99 @@ class MIMICCXRVQADataset(Dataset):
     def _get_view_position(self, dicom_id: str) -> Optional[str]:
         """Get ViewPosition for a DICOM ID from metadata (O(1) lookup)."""
         return self._dicom_to_view.get(str(dicom_id))
+    
+    def _get_cache_key(self) -> str:
+        """Generate a unique cache key based on dataset configuration."""
+        config_str = (
+            f"cxr:{self.mimic_cxr_path}|"
+            f"qa:{self.mimic_qa_path}|"
+            f"split:{self.split}|"
+            f"quality:{self.quality_grade}|"
+            f"view:{self.view_filter}|"
+            f"qtypes:{sorted(self.question_types) if self.question_types else 'all'}|"
+            f"max:{self.max_samples or 'none'}|"
+            f"exports:{self.use_exports}"
+        )
+        return hashlib.md5(config_str.encode()).hexdigest()[:16]
+    
+    def _get_cache_path(self) -> Path:
+        """Get the cache file path for current configuration."""
+        cache_key = self._get_cache_key()
+        return self.cache_dir / f"samples_{self.split}_{cache_key}.pkl"
+    
+    def _load_samples_with_cache(self) -> List[Dict[str, Any]]:
+        """Load samples with caching support for faster distributed training."""
+        cache_path = self._get_cache_path()
+        
+        # Try to load from cache
+        if self.use_cache and not self.force_rebuild_cache and cache_path.exists():
+            try:
+                logger.info(f"Loading samples from cache: {cache_path}")
+                with open(cache_path, 'rb') as f:
+                    samples = pickle.load(f)
+                logger.info(f"Loaded {len(samples)} samples from cache (instant!)")
+                
+                # Apply max_samples limit if needed
+                if self.max_samples and len(samples) > self.max_samples:
+                    samples = samples[:self.max_samples]
+                    
+                return samples
+            except Exception as e:
+                logger.warning(f"Failed to load cache, rebuilding: {e}")
+        
+        # Build samples from scratch
+        logger.info("Building samples from dataset (this may take 10-15 minutes)...")
+        samples = self._load_samples()
+        
+        # Save to cache
+        if self.use_cache and len(samples) > 0:
+            try:
+                logger.info(f"Saving {len(samples)} samples to cache: {cache_path}")
+                with open(cache_path, 'wb') as f:
+                    pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
+                logger.info("Cache saved successfully!")
+            except Exception as e:
+                logger.warning(f"Failed to save cache: {e}")
+        
+        return samples
+    
+    @classmethod
+    def prebuild_cache(
+        cls,
+        mimic_cxr_path: str,
+        mimic_qa_path: str,
+        splits: List[str] = ['train', 'val', 'test'],
+        quality_grade: str = 'all',
+        cache_dir: Optional[str] = None,
+        **kwargs
+    ):
+        """
+        Pre-build cache for all splits (run before distributed training).
+        
+        Usage:
+            python -c "from data.mimic_cxr_dataset import MIMICCXRVQADataset; \\
+                MIMICCXRVQADataset.prebuild_cache('/path/to/cxr', '/path/to/qa')"
+        """
+        for split in splits:
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Pre-building cache for split: {split}")
+            logger.info(f"{'='*60}")
+            
+            dataset = cls(
+                mimic_cxr_path=mimic_cxr_path,
+                mimic_qa_path=mimic_qa_path,
+                split=split,
+                quality_grade=quality_grade,
+                cache_dir=cache_dir,
+                use_cache=True,
+                force_rebuild_cache=True,  # Force rebuild
+                **kwargs
+            )
+            logger.info(f"Split {split}: {len(dataset)} samples cached")
+        
+        logger.info(f"\n{'='*60}")
+        logger.info("Cache pre-building complete!")
+        logger.info(f"{'='*60}")
     
     def _is_valid_view(self, view_position: Optional[str]) -> bool:
         """Check if view position matches filter criteria."""
