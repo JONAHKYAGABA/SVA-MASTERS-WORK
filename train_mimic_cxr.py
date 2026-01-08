@@ -1032,13 +1032,18 @@ def main(args):
         )
     
     # Create dataloaders with distributed samplers
+    # Optimized for high-CPU machines (48 vCPU = 10 workers per GPU * 4 GPUs)
+    prefetch_factor = getattr(config.training, 'dataloader_prefetch_factor', 4)
+    
     train_dataloader = create_dataloader(
         train_dataset,
         batch_size=config.training.batch_size_per_gpu,
         shuffle=(train_sampler is None),  # Don't shuffle if using sampler
         num_workers=config.training.dataloader_num_workers,
         pin_memory=config.training.dataloader_pin_memory,
-        sampler=train_sampler
+        sampler=train_sampler,
+        prefetch_factor=prefetch_factor,
+        drop_last=True  # Drop incomplete batches for stable training
     )
     
     val_dataloader = create_dataloader(
@@ -1047,7 +1052,8 @@ def main(args):
         shuffle=False,
         num_workers=config.training.dataloader_num_workers,
         pin_memory=config.training.dataloader_pin_memory,
-        sampler=val_sampler
+        sampler=val_sampler,
+        prefetch_factor=prefetch_factor
     )
     
     # Initialize model

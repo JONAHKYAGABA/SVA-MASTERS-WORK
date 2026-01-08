@@ -2,8 +2,10 @@
 """
 Pre-build dataset cache before distributed training.
 
-This script scans all QA files and builds a cache of samples
-that can be instantly loaded by all GPU processes during training.
+This script scans all QA files using PARALLEL PROCESSING and builds a cache 
+of samples that can be instantly loaded by all GPU processes during training.
+
+OPTIMIZED for high-CPU machines (e.g., 48 vCPU GCP instances).
 
 Run this ONCE before starting distributed training:
     python scripts/prebuild_cache.py --config configs/pretrain_config.yaml
@@ -16,8 +18,14 @@ import os
 import sys
 import argparse
 import logging
+import json
+import pickle
+import hashlib
 from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple, Set
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing as mp
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -31,9 +39,249 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def process_patient_group(args: Tuple) -> List[Dict[str, Any]]:
+    """
+    Process a single patient group directory (p10, p11, etc.)
+    This function runs in parallel across multiple CPU cores.
+    """
+    p_group_path, qa_dir, valid_studies, quality_grade, question_types, mimic_cxr_path = args
+    
+    samples = []
+    p_group = Path(p_group_path)
+    mimic_cxr_path = Path(mimic_cxr_path)
+    
+    for patient_dir in p_group.iterdir():
+        if not patient_dir.is_dir() or not patient_dir.name.startswith('p'):
+            continue
+        
+        for qa_file in patient_dir.glob('s*.qa.json'):
+            try:
+                # Parse IDs from path
+                subject_id = int(patient_dir.name[1:])
+                study_id_str = qa_file.stem.split('.')[0]
+                study_id = int(study_id_str[1:])
+                
+                # Check if in valid split
+                if valid_studies and (subject_id, study_id) not in valid_studies:
+                    continue
+                
+                # Load QA data
+                with open(qa_file) as f:
+                    qa_data = json.load(f)
+                
+                # Find corresponding image
+                image_path, dicom_id = find_image(mimic_cxr_path, subject_id, study_id)
+                if image_path is None:
+                    continue
+                
+                # Find scene graph
+                sg_dir = Path(qa_dir).parent / 'scene_data'
+                sg_path = find_scene_graph(sg_dir, subject_id, study_id)
+                
+                # Process each question
+                questions = qa_data.get('questions', [])
+                
+                for q in questions:
+                    # Quality filter
+                    if quality_grade and quality_grade.lower() not in ('', 'all', 'none'):
+                        q_quality = q.get('question_quality', q.get('quality', {}))
+                        if isinstance(q_quality, dict):
+                            quality_rating = q_quality.get('overall', q_quality.get('grade', 'B'))
+                        elif isinstance(q_quality, str):
+                            quality_rating = q_quality
+                        else:
+                            quality_rating = 'B'
+                        
+                        if not meets_quality_grade(quality_rating, quality_grade):
+                            continue
+                    
+                    # Question type filter
+                    q_type = q.get('question_type', 'unknown')
+                    if question_types and q_type not in question_types:
+                        continue
+                    
+                    samples.append({
+                        'subject_id': subject_id,
+                        'study_id': study_id,
+                        'dicom_id': dicom_id,
+                        'image_path': str(image_path),
+                        'scene_graph_path': str(sg_path) if sg_path else None,
+                        'question_id': q.get('question_id', ''),
+                        'question_type': q_type,
+                        'question_strategy': q.get('question_strategy', ''),
+                        'question': q.get('question', ''),
+                        'answers': q.get('answers', []),
+                        'obs_ids': q.get('obs_ids', []),
+                    })
+                    
+            except Exception as e:
+                continue
+    
+    return samples
+
+
+def find_image(mimic_cxr_path: Path, subject_id: int, study_id: int) -> Tuple[Optional[Path], Optional[str]]:
+    """Find the image file for a given subject and study."""
+    # Format: files/p{XX}/p{subject_id}/s{study_id}/*.jpg
+    p_prefix = f"p{str(subject_id)[:2]}"
+    study_dir = mimic_cxr_path / 'files' / p_prefix / f"p{subject_id}" / f"s{study_id}"
+    
+    if study_dir.exists():
+        # Find first .jpg file (prefer frontal views)
+        jpg_files = list(study_dir.glob('*.jpg'))
+        if jpg_files:
+            return jpg_files[0], jpg_files[0].stem
+    
+    return None, None
+
+
+def find_scene_graph(sg_dir: Path, subject_id: int, study_id: int) -> Optional[Path]:
+    """Find the scene graph file for a given subject and study."""
+    p_prefix = f"p{str(subject_id)[:2]}"
+    sg_path = sg_dir / p_prefix / f"p{subject_id}" / f"s{study_id}.scene_graph.json"
+    
+    if sg_path.exists():
+        return sg_path
+    return None
+
+
+def meets_quality_grade(actual_grade: str, required_grade: str) -> bool:
+    """Check if actual quality grade meets or exceeds required grade."""
+    grade_order = {'A++': 5, 'A+': 4, 'A': 3, 'B': 2, 'C': 1, 'U': 0}
+    actual_val = grade_order.get(actual_grade, 0)
+    required_val = grade_order.get(required_grade, 0)
+    return actual_val >= required_val
+
+
+def load_valid_studies(mimic_cxr_path: Path, split: str) -> Optional[Set[Tuple[int, int]]]:
+    """Load valid studies for the given split."""
+    import pandas as pd
+    
+    split_file = mimic_cxr_path / 'mimic-cxr-2.0.0-split.csv.gz'
+    if not split_file.exists():
+        split_file = mimic_cxr_path / 'mimic-cxr-2.0.0-split.csv'
+    
+    if split_file.exists():
+        if str(split_file).endswith('.gz'):
+            splits_df = pd.read_csv(split_file, compression='gzip')
+        else:
+            splits_df = pd.read_csv(split_file)
+        
+        # Map split names
+        split_name = 'validate' if split == 'val' else split
+        splits_df = splits_df[splits_df['split'] == split_name]
+        
+        valid_studies = set(zip(
+            splits_df['subject_id'].astype(int), 
+            splits_df['study_id'].astype(int)
+        ))
+        logger.info(f"Found {len(valid_studies)} studies in '{split_name}' split")
+        return valid_studies
+    
+    return None
+
+
+def parallel_build_cache(
+    mimic_cxr_path: str,
+    mimic_qa_path: str,
+    split: str = 'train',
+    quality_grade: str = 'all',
+    question_types: Optional[List[str]] = None,
+    num_workers: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Build sample cache using parallel processing across all CPUs.
+    
+    Args:
+        mimic_cxr_path: Path to MIMIC-CXR-JPG
+        mimic_qa_path: Path to MIMIC-Ext-CXR-QBA
+        split: Dataset split (train, val, test)
+        quality_grade: Quality grade filter
+        question_types: Question type filter
+        num_workers: Number of CPU workers (default: all available)
+    
+    Returns:
+        List of sample dictionaries
+    """
+    mimic_cxr_path = Path(mimic_cxr_path)
+    mimic_qa_path = Path(mimic_qa_path)
+    
+    # Determine number of workers
+    if num_workers is None:
+        num_workers = mp.cpu_count()
+    logger.info(f"Using {num_workers} CPU workers for parallel processing")
+    
+    # Load valid studies for this split
+    valid_studies = load_valid_studies(mimic_cxr_path, split)
+    
+    # Find QA directory
+    qa_dir = mimic_qa_path / 'qa'
+    if not qa_dir.exists():
+        logger.error(f"QA directory not found: {qa_dir}")
+        return []
+    
+    # Get all patient group directories
+    p_groups = sorted([p for p in qa_dir.iterdir() if p.is_dir() and p.name.startswith('p')])
+    logger.info(f"Found {len(p_groups)} patient groups to process")
+    
+    # Prepare arguments for parallel processing
+    # Convert valid_studies to a frozenset for pickling
+    valid_studies_frozen = frozenset(valid_studies) if valid_studies else None
+    
+    args_list = [
+        (str(p_group), str(qa_dir), valid_studies_frozen, quality_grade, question_types, str(mimic_cxr_path))
+        for p_group in p_groups
+    ]
+    
+    # Process in parallel
+    all_samples = []
+    completed = 0
+    
+    start_time = time.time()
+    
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = {executor.submit(process_patient_group, args): i for i, args in enumerate(args_list)}
+        
+        for future in as_completed(futures):
+            completed += 1
+            samples = future.result()
+            all_samples.extend(samples)
+            
+            # Progress logging every 10% or so
+            if completed % max(1, len(p_groups) // 10) == 0:
+                elapsed = time.time() - start_time
+                rate = completed / elapsed if elapsed > 0 else 0
+                eta = (len(p_groups) - completed) / rate if rate > 0 else 0
+                logger.info(f"  Progress: {completed}/{len(p_groups)} groups ({100*completed/len(p_groups):.1f}%) - "
+                           f"{len(all_samples):,} samples - ETA: {eta:.0f}s")
+    
+    total_time = time.time() - start_time
+    logger.info(f"Parallel scan complete: {len(all_samples):,} samples in {total_time:.1f}s")
+    
+    return all_samples
+
+
+def get_cache_key(
+    mimic_cxr_path: str,
+    mimic_qa_path: str,
+    split: str,
+    quality_grade: str,
+    question_types: Optional[List[str]] = None,
+) -> str:
+    """Generate a unique cache key based on configuration."""
+    config_str = (
+        f"cxr:{mimic_cxr_path}|"
+        f"qa:{mimic_qa_path}|"
+        f"split:{split}|"
+        f"quality:{quality_grade}|"
+        f"qtypes:{sorted(question_types) if question_types else 'all'}"
+    )
+    return hashlib.md5(config_str.encode()).hexdigest()[:16]
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Pre-build dataset cache for distributed training'
+        description='Pre-build dataset cache for distributed training (PARALLEL)'
     )
     parser.add_argument(
         '--config', 
@@ -70,12 +318,29 @@ def main():
         help='Quality grade filter (all for pretraining)'
     )
     parser.add_argument(
+        '--num_workers',
+        type=int,
+        default=None,
+        help='Number of CPU workers (default: all available CPUs)'
+    )
+    parser.add_argument(
         '--force',
         action='store_true',
         help='Force rebuild even if cache exists'
     )
     
     args = parser.parse_args()
+    
+    # Get number of CPUs
+    num_cpus = mp.cpu_count()
+    num_workers = args.num_workers or num_cpus
+    
+    logger.info("=" * 70)
+    logger.info("  PARALLEL DATASET CACHE PRE-BUILDER")
+    logger.info("=" * 70)
+    logger.info(f"  Available CPUs:    {num_cpus}")
+    logger.info(f"  Using workers:     {num_workers}")
+    logger.info("=" * 70)
     
     # Load config
     config = None
@@ -90,74 +355,97 @@ def main():
     # Get paths from args or config
     mimic_cxr_path = args.mimic_cxr_path
     mimic_qa_path = args.mimic_qa_path
+    quality_grade = args.quality_grade
     
     if config:
         if not mimic_cxr_path:
             mimic_cxr_path = config.data.mimic_cxr_jpg_path
         if not mimic_qa_path:
             mimic_qa_path = config.data.mimic_ext_cxr_qba_path
-        if not args.quality_grade:
-            args.quality_grade = config.data.quality_grade or 'all'
+        if not quality_grade:
+            quality_grade = config.data.quality_grade or 'all'
     
     if not mimic_cxr_path or not mimic_qa_path:
         logger.error("Please provide --mimic_cxr_path and --mimic_qa_path or a valid config")
         sys.exit(1)
     
-    logger.info("=" * 60)
-    logger.info("DATASET CACHE PRE-BUILDER")
-    logger.info("=" * 60)
     logger.info(f"  MIMIC-CXR-JPG:     {mimic_cxr_path}")
     logger.info(f"  MIMIC-Ext-CXR-QBA: {mimic_qa_path}")
     logger.info(f"  Splits:            {args.splits}")
-    logger.info(f"  Quality grade:     {args.quality_grade}")
+    logger.info(f"  Quality grade:     {quality_grade}")
     logger.info(f"  Cache directory:   {args.cache_dir}")
     logger.info(f"  Force rebuild:     {args.force}")
-    logger.info("=" * 60)
+    logger.info("=" * 70)
     
-    # Import dataset
-    from data.mimic_cxr_dataset import MIMICCXRVQADataset
+    # Create cache directory
+    cache_dir = Path(args.cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     
     total_samples = 0
     start_time = time.time()
     
     for split in args.splits:
-        logger.info(f"\n{'='*60}")
-        logger.info(f"Building cache for split: {split.upper()}")
-        logger.info(f"{'='*60}")
+        logger.info(f"\n{'='*70}")
+        logger.info(f"  Building cache for split: {split.upper()}")
+        logger.info(f"{'='*70}")
+        
+        # Generate cache path
+        cache_key = get_cache_key(mimic_cxr_path, mimic_qa_path, split, quality_grade, None)
+        cache_path = cache_dir / f"samples_{split}_{cache_key}.pkl"
+        
+        # Check if cache exists
+        if cache_path.exists() and not args.force:
+            logger.info(f"Cache already exists: {cache_path}")
+            logger.info("Use --force to rebuild")
+            
+            # Load to get count
+            with open(cache_path, 'rb') as f:
+                samples = pickle.load(f)
+            logger.info(f"  Cached samples: {len(samples):,}")
+            total_samples += len(samples)
+            continue
         
         split_start = time.time()
         
-        # Create dataset (this will build and cache samples)
-        dataset = MIMICCXRVQADataset(
+        # Build samples using parallel processing
+        samples = parallel_build_cache(
             mimic_cxr_path=mimic_cxr_path,
             mimic_qa_path=mimic_qa_path,
             split=split,
-            quality_grade=args.quality_grade,
-            cache_dir=args.cache_dir,
-            use_cache=True,
-            force_rebuild_cache=args.force,
+            quality_grade=quality_grade,
+            question_types=None,
+            num_workers=num_workers,
         )
         
-        split_time = time.time() - split_start
-        total_samples += len(dataset)
+        # Save to cache
+        logger.info(f"Saving {len(samples):,} samples to cache...")
+        with open(cache_path, 'wb') as f:
+            pickle.dump(samples, f, protocol=pickle.HIGHEST_PROTOCOL)
         
-        logger.info(f"  Split '{split}': {len(dataset):,} samples")
+        split_time = time.time() - split_start
+        total_samples += len(samples)
+        
+        cache_size_mb = cache_path.stat().st_size / (1024 * 1024)
+        
+        logger.info(f"  Split '{split}': {len(samples):,} samples")
+        logger.info(f"  Cache size: {cache_size_mb:.1f} MB")
         logger.info(f"  Time: {split_time:.1f}s ({split_time/60:.1f} minutes)")
     
     total_time = time.time() - start_time
     
-    logger.info(f"\n{'='*60}")
-    logger.info("CACHE PRE-BUILD COMPLETE!")
-    logger.info("=" * 60)
+    logger.info(f"\n{'='*70}")
+    logger.info("  CACHE PRE-BUILD COMPLETE!")
+    logger.info("=" * 70)
     logger.info(f"  Total samples: {total_samples:,}")
     logger.info(f"  Total time:    {total_time:.1f}s ({total_time/60:.1f} minutes)")
     logger.info(f"  Cache dir:     {args.cache_dir}")
     logger.info("")
-    logger.info("You can now run distributed training!")
-    logger.info("The cache will be loaded instantly on all GPUs.")
-    logger.info("=" * 60)
+    logger.info("  Now run distributed training:")
+    logger.info("  deepspeed --num_gpus=4 train_mimic_cxr.py \\")
+    logger.info("    --config configs/pretrain_config.yaml \\")
+    logger.info("    --deepspeed_config configs/deepspeed_config.json")
+    logger.info("=" * 70)
 
 
 if __name__ == '__main__':
     main()
-

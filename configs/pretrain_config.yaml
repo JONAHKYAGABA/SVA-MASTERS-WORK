@@ -105,10 +105,12 @@ training:
   save_total_limit: 3
   eval_steps: 5000
   
-  # DataLoader - OPTIMIZED FOR 32 WORKERS
-  dataloader_num_workers: 32
+  # DataLoader - OPTIMIZED FOR 48 vCPU MACHINE
+  # With 4 GPUs: 48 / 4 = 12 workers per GPU, using 10 to leave room for system
+  dataloader_num_workers: 10  # Per GPU (total 40 across 4 GPUs)
   dataloader_pin_memory: true
   dataloader_prefetch_factor: 4
+  dataloader_persistent_workers: true  # Keep workers alive between epochs
   
   # Hugging Face Hub - UPDATE WITH YOUR HF USERNAME
   hub_model_id: "KYAGABA/mimic-cxr-vqa-pretrain"  # Your HF repo

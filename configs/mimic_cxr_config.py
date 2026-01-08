@@ -129,10 +129,11 @@ class TrainingConfig:
     # Early stopping
     early_stopping_patience: int = 5
     
-    # Data loading
-    dataloader_num_workers: int = 8
+    # Data loading - optimized for high-CPU machines
+    dataloader_num_workers: int = 8  # Per GPU
     dataloader_pin_memory: bool = True
     dataloader_prefetch_factor: int = 2
+    dataloader_persistent_workers: bool = True  # Keep workers alive between epochs
     
     # Hugging Face Hub
     hub_model_id: str = ""
