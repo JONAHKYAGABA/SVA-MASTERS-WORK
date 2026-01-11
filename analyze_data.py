@@ -74,10 +74,243 @@ from dataclasses import dataclass, field
 import warnings
 import random
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from multiprocessing import Pool, cpu_count
+from functools import partial
 import traceback
 
 import numpy as np
 import pandas as pd
+
+
+# =============================================================================
+# MAPREDUCE FUNCTIONS (Top-level for pickling)
+# =============================================================================
+
+# Anatomical regions for keyword matching (module-level for mappers)
+_ANATOMICAL_REGIONS = {
+    'cardiac': ['heart', 'cardiac', 'cardiomegaly', 'cardiomediastinum', 'aorta'],
+    'pulmonary': ['lung', 'pulmonary', 'bronchi', 'airway', 'lobe'],
+    'pleural': ['pleura', 'pleural', 'effusion', 'pneumothorax'],
+    'mediastinal': ['mediastinum', 'mediastinal', 'hilum', 'hilar'],
+    'osseous': ['rib', 'spine', 'clavicle', 'bone', 'fracture', 'vertebra'],
+}
+
+
+def _map_qa_file(qa_file_path: str) -> dict:
+    """
+    MAP function: Process a single QA file and return aggregated counts.
+    Returns a dict with counts that can be easily reduced.
+    """
+    try:
+        with open(qa_file_path, 'r') as f:
+            qa_data = json.load(f)
+        
+        questions = qa_data.get('questions', [])
+        
+        result = {
+            'total_qa': len(questions),
+            'question_types': {},
+            'answer_types': {'binary': 0, 'region': 0, 'severity': 0, 'category': 0},
+            'polarity': {'positive': 0, 'negative': 0, 'neutral': 0},
+            'regions': {'cardiac': 0, 'pulmonary': 0, 'pleural': 0, 'mediastinal': 0, 'osseous': 0, 'other': 0},
+        }
+        
+        for q in questions:
+            # Question type
+            q_type = q.get('question_type', 'unknown')
+            result['question_types'][q_type] = result['question_types'].get(q_type, 0) + 1
+            
+            # Categorize question type
+            q_type_lower = q_type.lower()
+            if any(t in q_type_lower for t in ['is_', 'has_', 'yes', 'no']):
+                result['answer_types']['binary'] += 1
+            elif any(t in q_type_lower for t in ['where', 'locate', 'position']):
+                result['answer_types']['region'] += 1
+            elif any(t in q_type_lower for t in ['severe', 'grade']):
+                result['answer_types']['severity'] += 1
+            else:
+                result['answer_types']['category'] += 1
+            
+            # Polarity (positive/negative findings)
+            answers = q.get('answers', [])
+            if answers:
+                answer_text = answers[0].get('text', '').lower()
+                if 'yes' in answer_text or 'present' in answer_text or 'positive' in answer_text:
+                    result['polarity']['positive'] += 1
+                elif 'no' in answer_text or 'absent' in answer_text or 'negative' in answer_text:
+                    result['polarity']['negative'] += 1
+                else:
+                    result['polarity']['neutral'] += 1
+            
+            # Anatomical regions
+            question_text = q.get('question', '').lower()
+            found_region = False
+            for region_cat, keywords in _ANATOMICAL_REGIONS.items():
+                if any(kw in question_text for kw in keywords):
+                    result['regions'][region_cat] += 1
+                    found_region = True
+                    break
+            if not found_region:
+                result['regions']['other'] += 1
+        
+        return result
+    except Exception:
+        return {
+            'total_qa': 0,
+            'question_types': {},
+            'answer_types': {'binary': 0, 'region': 0, 'severity': 0, 'category': 0},
+            'polarity': {'positive': 0, 'negative': 0, 'neutral': 0},
+            'regions': {'cardiac': 0, 'pulmonary': 0, 'pleural': 0, 'mediastinal': 0, 'osseous': 0, 'other': 0},
+        }
+
+
+def _map_qa_chunk(file_paths: list) -> dict:
+    """
+    MAP function for a CHUNK of QA files.
+    Processes multiple files and returns combined result.
+    This reduces IPC overhead by sending fewer, larger results.
+    """
+    combined = {
+        'total_qa': 0,
+        'question_types': {},
+        'answer_types': {'binary': 0, 'region': 0, 'severity': 0, 'category': 0},
+        'polarity': {'positive': 0, 'negative': 0, 'neutral': 0},
+        'regions': {'cardiac': 0, 'pulmonary': 0, 'pleural': 0, 'mediastinal': 0, 'osseous': 0, 'other': 0},
+        'files_processed': 0,
+    }
+    
+    for fp in file_paths:
+        result = _map_qa_file(fp)
+        combined['total_qa'] += result['total_qa']
+        combined['files_processed'] += 1
+        
+        # Merge question_types
+        for qt, count in result['question_types'].items():
+            combined['question_types'][qt] = combined['question_types'].get(qt, 0) + count
+        
+        # Merge answer_types
+        for at, count in result['answer_types'].items():
+            combined['answer_types'][at] += count
+        
+        # Merge polarity
+        for pol, count in result['polarity'].items():
+            combined['polarity'][pol] += count
+        
+        # Merge regions
+        for reg, count in result['regions'].items():
+            combined['regions'][reg] += count
+    
+    return combined
+
+
+def _map_sg_file(sg_file_path: str) -> dict:
+    """
+    MAP function: Process a single scene graph file.
+    """
+    try:
+        with open(sg_file_path, 'r') as f:
+            sg = json.load(f)
+        
+        observations = sg.get('observations', {})
+        num_obs = len(observations)
+        
+        local_regions = 0
+        local_bboxes = 0
+        
+        for _, obs in observations.items():
+            regions = obs.get('regions', [])
+            local_regions += len(regions)
+            
+            if 'localization' in obs and obs['localization']:
+                local_bboxes += 1
+        
+        return {
+            'num_observations': num_obs,
+            'num_regions': local_regions,
+            'num_bboxes': local_bboxes,
+            'valid': num_obs > 0 or local_regions > 0
+        }
+    except Exception:
+        return {'num_observations': 0, 'num_regions': 0, 'num_bboxes': 0, 'valid': False}
+
+
+def _map_sg_chunk(file_paths: list) -> dict:
+    """
+    MAP function for a CHUNK of scene graph files.
+    """
+    combined = {
+        'total_observations': 0,
+        'total_regions': 0,
+        'total_bboxes': 0,
+        'graphs_analyzed': 0,
+    }
+    
+    for fp in file_paths:
+        result = _map_sg_file(fp)
+        if result['valid']:
+            combined['total_observations'] += result['num_observations']
+            combined['total_regions'] += result['num_regions']
+            combined['total_bboxes'] += result['num_bboxes']
+            combined['graphs_analyzed'] += 1
+    
+    return combined
+
+
+def _reduce_qa_results(results: list) -> dict:
+    """
+    REDUCE function: Combine all QA map results into final aggregation.
+    """
+    final = {
+        'total_qa': 0,
+        'question_types': Counter(),
+        'answer_types': Counter(),
+        'polarity': Counter(),
+        'regions': Counter(),
+        'files_processed': 0,
+    }
+    
+    for r in results:
+        final['total_qa'] += r.get('total_qa', 0)
+        final['files_processed'] += r.get('files_processed', 0)
+        
+        for qt, count in r.get('question_types', {}).items():
+            final['question_types'][qt] += count
+        
+        for at, count in r.get('answer_types', {}).items():
+            final['answer_types'][at] += count
+        
+        for pol, count in r.get('polarity', {}).items():
+            final['polarity'][pol] += count
+        
+        for reg, count in r.get('regions', {}).items():
+            final['regions'][reg] += count
+    
+    return final
+
+
+def _reduce_sg_results(results: list) -> dict:
+    """
+    REDUCE function: Combine all scene graph map results.
+    """
+    final = {
+        'total_observations': 0,
+        'total_regions': 0,
+        'total_bboxes': 0,
+        'graphs_analyzed': 0,
+    }
+    
+    for r in results:
+        final['total_observations'] += r.get('total_observations', 0)
+        final['total_regions'] += r.get('total_regions', 0)
+        final['total_bboxes'] += r.get('total_bboxes', 0)
+        final['graphs_analyzed'] += r.get('graphs_analyzed', 0)
+    
+    return final
+
+
+def _chunk_list(lst: list, chunk_size: int) -> list:
+    """Split a list into chunks of specified size."""
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
 # Suppress noisy warnings
 warnings.filterwarnings('ignore', message='.*categorical units.*')
@@ -2359,100 +2592,96 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
         logger.info(f"  Total images found: {image_count:,}")
     
     def _analyze_qa_pairs(self):
-        """Analyze QA pair statistics and distributions."""
+        """
+        Analyze QA pair statistics and distributions using MapReduce.
+        
+        MapReduce approach:
+        1. MAP: Each worker processes a chunk of QA files independently
+        2. REDUCE: Main process combines all partial results
+        
+        Benefits:
+        - Minimizes inter-process communication (chunked processing)
+        - No shared state between workers
+        - Robust against individual file failures
+        """
         qa_dir = self.mimic_qa_path / 'qa'
         if not qa_dir.exists():
             logger.warning("QA directory not found, skipping QA analysis")
             return
         
-        total_qa = 0
-        question_types = Counter()
-        answer_types = Counter()
-        polarity = Counter()
-        regions = Counter()
+        # Collect all QA file paths (as strings for pickling)
+        logger.info("  Collecting QA file paths...")
+        all_qa_files = [str(f) for f in qa_dir.rglob('*.qa.json')]
+        total_files = len(all_qa_files)
         
-        # Sample QA files
-        qa_files = list(qa_dir.rglob('*.qa.json'))[:10000]  # Sample for speed
+        if total_files == 0:
+            logger.warning("No QA files found")
+            return
         
-        logger.info(f"  Sampling {len(qa_files)} QA files...")
-        def process_qa_file(qa_file):
-            nonlocal total_qa
-            try:
-                with open(qa_file) as f:
-                    qa_data = json.load(f)
-                
-                questions = qa_data.get('questions', [])
-                total_local = len(questions)
-                local_qt = Counter()
-                local_at = Counter()
-                local_pol = Counter()
-                local_regions = Counter()
-                
-                for q in questions:
-                    # Question type
-                    q_type = q.get('question_type', 'unknown')
-                    local_qt[q_type] += 1
-                    
-                    # Categorize question type
-                    q_type_lower = q_type.lower()
-                    if any(t in q_type_lower for t in ['is_', 'has_', 'yes', 'no']):
-                        local_at['binary'] += 1
-                    elif any(t in q_type_lower for t in ['where', 'locate', 'position']):
-                        local_at['region'] += 1
-                    elif any(t in q_type_lower for t in ['severe', 'grade']):
-                        local_at['severity'] += 1
-                    else:
-                        local_at['category'] += 1
-                    
-                    # Polarity (positive/negative findings)
-                    answers = q.get('answers', [])
-                    if answers:
-                        answer_text = answers[0].get('text', '').lower()
-                        if 'yes' in answer_text or 'present' in answer_text or 'positive' in answer_text:
-                            local_pol['positive'] += 1
-                        elif 'no' in answer_text or 'absent' in answer_text or 'negative' in answer_text:
-                            local_pol['negative'] += 1
-                        else:
-                            local_pol['neutral'] += 1
-                    
-                    # Anatomical regions
-                    question_text = q.get('question', '').lower()
-                    for region_cat, keywords in self.ANATOMICAL_REGIONS.items():
-                        if any(kw in question_text for kw in keywords):
-                            local_regions[region_cat] += 1
-                            break
-                    else:
-                        local_regions['other'] += 1
-                
-                return total_local, local_qt, local_at, local_pol, local_regions
-            except Exception:
-                return 0, Counter(), Counter(), Counter(), Counter()
+        # Sample for speed if too many files
+        sample_size = min(50000, total_files)  # Process up to 50K files
+        if total_files > sample_size:
+            import random
+            qa_files = random.sample(all_qa_files, sample_size)
+            logger.info(f"  Sampled {sample_size:,} of {total_files:,} QA files")
+        else:
+            qa_files = all_qa_files
+            logger.info(f"  Processing all {total_files:,} QA files")
         
-        # Parallelize over QA files
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=self.num_workers) as ex:
-            for total_local, l_qt, l_at, l_pol, l_regions in ex.map(process_qa_file, qa_files):
-                total_qa += total_local
-                question_types.update(l_qt)
-                answer_types.update(l_at)
-                polarity.update(l_pol)
-                regions.update(l_regions)
+        # Determine chunk size and number of workers
+        num_workers = min(self.num_workers, max(1, cpu_count() - 1))
+        chunk_size = max(100, len(qa_files) // (num_workers * 4))  # ~4 chunks per worker
+        chunks = _chunk_list(qa_files, chunk_size)
+        
+        logger.info(f"  MapReduce: {len(chunks)} chunks, {num_workers} workers, ~{chunk_size} files/chunk")
+        
+        # ============ MAP PHASE ============
+        # Process chunks in parallel using multiprocessing Pool
+        map_results = []
+        
+        try:
+            with Pool(processes=num_workers) as pool:
+                # Use imap_unordered for better memory efficiency and progress tracking
+                for i, result in enumerate(pool.imap_unordered(_map_qa_chunk, chunks)):
+                    map_results.append(result)
+                    if (i + 1) % 10 == 0 or (i + 1) == len(chunks):
+                        progress = (i + 1) / len(chunks) * 100
+                        logger.info(f"    MAP progress: {i+1}/{len(chunks)} chunks ({progress:.1f}%)")
+        except Exception as e:
+            logger.warning(f"  Multiprocessing failed ({e}), falling back to sequential")
+            # Fallback to sequential processing
+            for i, chunk in enumerate(chunks):
+                result = _map_qa_chunk(chunk)
+                map_results.append(result)
+                if (i + 1) % 20 == 0:
+                    logger.info(f"    Sequential progress: {i+1}/{len(chunks)} chunks")
+        
+        # ============ REDUCE PHASE ============
+        logger.info("  REDUCE: Combining results...")
+        final = _reduce_qa_results(map_results)
         
         # Scale up estimates based on sampling
-        scale_factor = len(list(qa_dir.rglob('*.qa.json'))) / max(len(qa_files), 1)
+        scale_factor = total_files / max(len(qa_files), 1)
         
-        self.report.total_qa_pairs = int(total_qa * scale_factor)
-        self.report.question_type_distribution = dict(question_types.most_common(20))
-        self.report.answer_type_distribution = dict(answer_types)
-        self.report.polarity_distribution = dict(polarity)
-        self.report.region_distribution = dict(regions)
+        self.report.total_qa_pairs = int(final['total_qa'] * scale_factor)
+        self.report.question_type_distribution = dict(final['question_types'].most_common(20))
+        self.report.answer_type_distribution = dict(final['answer_types'])
+        self.report.polarity_distribution = dict(final['polarity'])
+        self.report.region_distribution = dict(final['regions'])
         
+        logger.info(f"  ✓ Processed {final['files_processed']:,} files")
         logger.info(f"  Estimated total QA pairs: {self.report.total_qa_pairs:,}")
-        logger.info(f"  Question types found: {len(question_types)}")
-        logger.info(f"  Top 5 question types: {question_types.most_common(5)}")
+        logger.info(f"  Question types found: {len(final['question_types'])}")
+        logger.info(f"  Top 5 question types: {final['question_types'].most_common(5)}")
     
     def _analyze_scene_graphs(self):
-        """Analyze scene graph quality and statistics."""
+        """
+        Analyze scene graph quality and statistics using MapReduce.
+        
+        MapReduce approach:
+        1. MAP: Each worker processes a chunk of scene graph files
+        2. REDUCE: Main process combines all partial results
+        """
         # Try multiple possible scene graph locations
         sg_dirs = [
             self.mimic_qa_path / 'scene_graphs',
@@ -2471,58 +2700,61 @@ Avg per Column:      {df.memory_usage(deep=True).sum() / n_cols / 1024:>12.2f} K
             self.report.warnings.append("Scene graph directory not found")
             return
         
-        # Sample scene graphs
-        sg_files = list(sg_dir.rglob('*.json'))[:5000]
+        # Collect all scene graph file paths (as strings for pickling)
+        logger.info("  Collecting scene graph file paths...")
+        all_sg_files = [str(f) for f in sg_dir.rglob('*.json')]
+        total_files = len(all_sg_files)
         
-        if not sg_files:
+        if total_files == 0:
             logger.warning("No scene graph files found")
             return
         
-        logger.info(f"  Sampling {len(sg_files)} scene graph files...")
+        # Sample for speed if too many files
+        sample_size = min(20000, total_files)  # Process up to 20K files
+        if total_files > sample_size:
+            import random
+            sg_files = random.sample(all_sg_files, sample_size)
+            logger.info(f"  Sampled {sample_size:,} of {total_files:,} scene graph files")
+        else:
+            sg_files = all_sg_files
+            logger.info(f"  Processing all {total_files:,} scene graph files")
         
-        total_observations = 0
-        total_regions = 0
-        total_bboxes = 0
-        graphs_analyzed = 0
-
-        def process_sg_file(sg_file):
-            try:
-                with open(sg_file) as f:
-                    sg = json.load(f)
-                
-                observations = sg.get('observations', {})
-                num_obs = len(observations)
-                
-                local_regions = 0
-                local_bboxes = 0
-                
-                for _, obs in observations.items():
-                    regions = obs.get('regions', [])
-                    local_regions += len(regions)
-                    
-                    if 'localization' in obs and obs['localization']:
-                        local_bboxes += 1
-                
-                return num_obs, local_regions, local_bboxes
-            except Exception:
-                return 0, 0, 0
+        # Determine chunk size and number of workers
+        num_workers = min(self.num_workers, max(1, cpu_count() - 1))
+        chunk_size = max(50, len(sg_files) // (num_workers * 4))
+        chunks = _chunk_list(sg_files, chunk_size)
         
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=self.num_workers) as ex:
-            for num_obs, local_regions, local_bboxes in ex.map(process_sg_file, sg_files):
-                if num_obs == 0 and local_regions == 0:
-                    continue
-                graphs_analyzed += 1
-                total_observations += num_obs
-                total_regions += local_regions
-                total_bboxes += local_bboxes
+        logger.info(f"  MapReduce: {len(chunks)} chunks, {num_workers} workers, ~{chunk_size} files/chunk")
         
-        if graphs_analyzed > 0:
-            self.report.total_scene_graphs = int(len(list(sg_dir.rglob('*.json'))))
-            self.report.avg_observations_per_graph = total_observations / graphs_analyzed
-            self.report.avg_regions_per_observation = total_regions / max(total_observations, 1)
-            self.report.bbox_coverage = total_bboxes / max(total_observations, 1)
+        # ============ MAP PHASE ============
+        map_results = []
+        
+        try:
+            with Pool(processes=num_workers) as pool:
+                for i, result in enumerate(pool.imap_unordered(_map_sg_chunk, chunks)):
+                    map_results.append(result)
+                    if (i + 1) % 10 == 0 or (i + 1) == len(chunks):
+                        progress = (i + 1) / len(chunks) * 100
+                        logger.info(f"    MAP progress: {i+1}/{len(chunks)} chunks ({progress:.1f}%)")
+        except Exception as e:
+            logger.warning(f"  Multiprocessing failed ({e}), falling back to sequential")
+            for i, chunk in enumerate(chunks):
+                result = _map_sg_chunk(chunk)
+                map_results.append(result)
+                if (i + 1) % 20 == 0:
+                    logger.info(f"    Sequential progress: {i+1}/{len(chunks)} chunks")
+        
+        # ============ REDUCE PHASE ============
+        logger.info("  REDUCE: Combining results...")
+        final = _reduce_sg_results(map_results)
+        
+        if final['graphs_analyzed'] > 0:
+            self.report.total_scene_graphs = total_files
+            self.report.avg_observations_per_graph = final['total_observations'] / final['graphs_analyzed']
+            self.report.avg_regions_per_observation = final['total_regions'] / max(final['total_observations'], 1)
+            self.report.bbox_coverage = final['total_bboxes'] / max(final['total_observations'], 1)
             
+            logger.info(f"  ✓ Analyzed {final['graphs_analyzed']:,} scene graphs")
             logger.info(f"  Total scene graphs: {self.report.total_scene_graphs:,}")
             logger.info(f"  Avg observations per graph: {self.report.avg_observations_per_graph:.2f}")
             logger.info(f"  Avg regions per observation: {self.report.avg_regions_per_observation:.2f}")
