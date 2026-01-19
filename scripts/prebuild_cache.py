@@ -8,10 +8,21 @@ MapReduce approach:
 
 Includes validation to ensure cache matches model input requirements.
 
-Run:
+Run (full dataset):
     python scripts/prebuild_cache.py --config configs/pretrain_config.yaml
     python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --num_workers 24
     python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --validate_only
+
+Run (SUBSET for pipeline testing - recommended for initial development):
+    # Use 5% of data for quick pipeline verification
+    python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --sample_percent 5
+    
+    # Use exact number of samples (e.g., 10,000 for testing)
+    python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --max_samples 10000
+    
+    # Very small subset for debugging (1%)
+    python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --sample_percent 1 --split train
+    python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --sample_percent 1 --split val
 """
 
 import os
@@ -696,11 +707,33 @@ def main():
                         help='Number of samples to validate (default: 200)')
     parser.add_argument('--skip_file_checks', action='store_true',
                         help='Skip checking if image/scene_graph files exist')
+    # ===== NEW: Subset sampling for pipeline testing =====
+    parser.add_argument('--sample_percent', type=float, default=100.0,
+                        help='Percentage of data to use (1-100). Use 5 for 5%% subset to test pipeline. Default: 100')
+    parser.add_argument('--max_samples', type=int, default=None,
+                        help='Maximum number of samples to cache. Overrides --sample_percent if set.')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for subset sampling (default: 42)')
     args = parser.parse_args()
+    
+    # Validate sample_percent
+    if args.sample_percent <= 0 or args.sample_percent > 100:
+        print(f"ERROR: --sample_percent must be between 0 and 100, got {args.sample_percent}")
+        sys.exit(1)
     
     print("=" * 70)
     print("  MAPREDUCE CACHE BUILDER")
     print("=" * 70)
+    
+    # Subset mode detection
+    is_subset = args.sample_percent < 100.0 or args.max_samples is not None
+    if is_subset:
+        print(f"\n  ⚡ SUBSET MODE: Testing pipeline with limited data")
+        if args.max_samples:
+            print(f"     Max samples: {args.max_samples:,}")
+        else:
+            print(f"     Sample: {args.sample_percent}% of data")
+        print(f"     Seed: {args.seed}")
     
     # Load config
     config = None
@@ -723,11 +756,18 @@ def main():
     print(f"  CXR: {mimic_cxr_path}")
     print(f"  QA:  {mimic_qa_path}")
     
-    # Cache path
+    # Cache path - include subset info in filename if using subset
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_key = hashlib.md5(f"{mimic_cxr_path}|{mimic_qa_path}|{args.split}".encode()).hexdigest()[:12]
-    cache_path = cache_dir / f"samples_{args.split}_{cache_key}.pkl"
+    
+    if is_subset:
+        # Include subset percentage/max in cache key for unique naming
+        subset_str = f"_max{args.max_samples}" if args.max_samples else f"_{args.sample_percent}pct"
+        cache_key = hashlib.md5(f"{mimic_cxr_path}|{mimic_qa_path}|{args.split}|subset{subset_str}|seed{args.seed}".encode()).hexdigest()[:12]
+        cache_path = cache_dir / f"samples_{args.split}{subset_str}_{cache_key}.pkl"
+    else:
+        cache_key = hashlib.md5(f"{mimic_cxr_path}|{mimic_qa_path}|{args.split}".encode()).hexdigest()[:12]
+        cache_path = cache_dir / f"samples_{args.split}_{cache_key}.pkl"
     
     print(f"  Cache: {cache_path}")
     
@@ -810,11 +850,30 @@ def main():
                 if patient_dir.is_dir() and patient_dir.name.startswith('p'):
                     qa_files.extend([str(f) for f in patient_dir.glob('s*.qa.json')])
     
-    print(f"  {len(qa_files):,} QA files found")
+    total_qa_files = len(qa_files)
+    print(f"  {total_qa_files:,} QA files found")
     
     if not qa_files:
         print("ERROR: No QA files found")
         sys.exit(1)
+    
+    # ===== SUBSET SAMPLING =====
+    if is_subset:
+        print(f"\n  Applying subset sampling...")
+        random.seed(args.seed)
+        
+        if args.max_samples:
+            # Estimate samples per file (~5-10 questions per study on average)
+            # Sample more files than needed to account for filtered studies
+            est_samples_per_file = 5
+            files_needed = min(len(qa_files), int((args.max_samples / est_samples_per_file) * 1.5))
+            qa_files = random.sample(qa_files, files_needed)
+            print(f"  Sampled {len(qa_files):,} files (targeting ~{args.max_samples:,} samples)")
+        else:
+            # Sample by percentage
+            sample_count = max(1, int(len(qa_files) * (args.sample_percent / 100.0)))
+            qa_files = random.sample(qa_files, sample_count)
+            print(f"  Sampled {len(qa_files):,} files ({args.sample_percent}% of {total_qa_files:,})")
     
     # =========================================================================
     # STEP 3: MapReduce processing
@@ -898,6 +957,13 @@ def main():
     # ============ REDUCE PHASE (already done - just concatenation) ============
     print(f"\n  REDUCE phase: Combined {len(all_samples):,} samples")
     
+    # ===== APPLY MAX_SAMPLES LIMIT (if specified) =====
+    if args.max_samples and len(all_samples) > args.max_samples:
+        print(f"\n  Truncating to --max_samples={args.max_samples:,}...")
+        random.seed(args.seed)  # Ensure reproducibility
+        all_samples = random.sample(all_samples, args.max_samples)
+        print(f"  Final sample count: {len(all_samples):,}")
+    
     # =========================================================================
     # STEP 4: Summary and save
     # =========================================================================
@@ -906,6 +972,8 @@ def main():
     print("-" * 70)
     
     print(f"  Total samples: {len(all_samples):,}")
+    if is_subset:
+        print(f"  ⚡ SUBSET MODE: This is a reduced dataset for pipeline testing")
     print(f"  Files processed: {total_processed:,}")
     print(f"  Skipped (wrong split): {total_skipped_split:,}")
     print(f"  Skipped (no image): {total_skipped_img:,}")
@@ -946,10 +1014,29 @@ def main():
         print("⚠ CACHE BUILT BUT VALIDATION FOUND ISSUES")
         print("  Training may still work, but check issues above")
     print("=" * 70)
-    print("\nNow run training:")
-    print("  deepspeed --num_gpus=4 train_mimic_cxr.py \\")
-    print("    --config configs/pretrain_config.yaml \\")
-    print("    --deepspeed_config configs/deepspeed_config.json")
+    
+    if is_subset:
+        print("\n⚡ SUBSET MODE - Cache is ready for pipeline testing!")
+        print(f"   Samples: {len(all_samples):,}")
+        print(f"   Cache file: {cache_path.name}")
+        print("\nNow test the training pipeline:")
+        print("  # Quick single-GPU test:")
+        print("  python train_mimic_cxr.py \\")
+        print("    --config configs/pretrain_config.yaml \\")
+        print("    --max_steps 100 \\")
+        print("    --eval_steps 50")
+        print("\n  # Multi-GPU test with DeepSpeed:")
+        print("  deepspeed --num_gpus=4 train_mimic_cxr.py \\")
+        print("    --config configs/pretrain_config.yaml \\")
+        print("    --deepspeed_config configs/deepspeed_config.json \\")
+        print("    --max_steps 200")
+        print("\nOnce pipeline is verified, build FULL cache:")
+        print("  python scripts/prebuild_cache.py --config configs/pretrain_config.yaml --force")
+    else:
+        print("\nNow run training:")
+        print("  deepspeed --num_gpus=4 train_mimic_cxr.py \\")
+        print("    --config configs/pretrain_config.yaml \\")
+        print("    --deepspeed_config configs/deepspeed_config.json")
     print("=" * 70)
 
 
