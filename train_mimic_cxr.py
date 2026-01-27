@@ -45,7 +45,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 # DeepSpeed import (optional)
@@ -584,7 +584,7 @@ def train_epoch(
         else:
             # Mixed precision forward pass
             if scaler is not None and config.training.fp16:
-                with autocast():
+                with autocast('cuda'):
                     outputs = model(
                         images=images,
                         input_ids=input_ids,
@@ -1164,7 +1164,7 @@ def main(args):
             anneal_strategy='cos'
         )
         
-        scaler = GradScaler() if config.training.fp16 else None
+        scaler = GradScaler('cuda') if config.training.fp16 else None
         
     # Single GPU / DataParallel fallback
     else:
@@ -1192,7 +1192,7 @@ def main(args):
             anneal_strategy='cos'
         )
         
-        scaler = GradScaler() if config.training.fp16 else None
+        scaler = GradScaler('cuda''cuda') if config.training.fp16 else None
     
     # Print training info (main process only)
     if is_main_process(local_rank):

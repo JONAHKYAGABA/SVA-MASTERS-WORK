@@ -724,9 +724,16 @@ class MIMICCXRVQAModel(nn.Module):
         visual_features = self.visual_proj(visual_features)  # (B, N, D)
         
         # Create visual mask
+        # Create visual mask
         visual_mask = torch.zeros(batch_size, visual_features.shape[1], device=device)
-        for i, sg in enumerate(scene_graphs):
-            visual_mask[i, :sg['num_objects']] = 1.0
+
+# Slice scene_graphs to match the local batch size handled by this GPU
+        local_scene_graphs = scene_graphs[:batch_size]
+
+        for i, sg in enumerate(local_scene_graphs):
+            num_objects = min(sg['num_objects'], visual_features.shape[1])
+            visual_mask[i, :num_objects] = 1.0
+       
         
         # Encode text
         text_features, text_pooled = self.text_encoder(
