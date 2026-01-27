@@ -673,7 +673,6 @@ class MIMICCXRVQAModel(nn.Module):
         self.gradient_checkpointing = True
         if hasattr(self.text_encoder.encoder, 'gradient_checkpointing_enable'):
             self.text_encoder.encoder.gradient_checkpointing_enable()
-    
     def forward(
         self,
         images: torch.Tensor,
@@ -709,39 +708,38 @@ class MIMICCXRVQAModel(nn.Module):
         device = images.device
         batch_size = images.shape[0]
         
+        # CRITICAL FIX: Slice scene_graphs to match the local batch size on this GPU
+        # DataParallel automatically splits tensor inputs but NOT list inputs
+        # This ensures scene_graphs matches the local batch size after splitting
+        local_scene_graphs = scene_graphs[:batch_size]
+        
         # Store image dimensions for potential downstream use
         self._image_widths = image_widths
         self._image_heights = image_heights
         
         # Extract visual features
-        # Get bboxes from scene graphs
+        # Get bboxes from scene graphs (using local_scene_graphs)
         bboxes = []
-        for sg in scene_graphs:
+        for sg in local_scene_graphs:
             sg_bboxes = torch.tensor(sg['bboxes'], dtype=torch.float, device=device)
             bboxes.append(sg_bboxes)
         
         visual_features = self.visual_encoder(images, bboxes)  # (B, N, 512)
         visual_features = self.visual_proj(visual_features)  # (B, N, D)
         
-        # Create visual mask
-        # Create visual mask
+        # Create visual mask (using local_scene_graphs)
         visual_mask = torch.zeros(batch_size, visual_features.shape[1], device=device)
-
-# Slice scene_graphs to match the local batch size handled by this GPU
-        local_scene_graphs = scene_graphs[:batch_size]
-
         for i, sg in enumerate(local_scene_graphs):
             num_objects = min(sg['num_objects'], visual_features.shape[1])
             visual_mask[i, :num_objects] = 1.0
-       
         
         # Encode text
         text_features, text_pooled = self.text_encoder(
             input_ids, attention_mask, token_type_ids
         )  # (B, L, D), (B, D)
         
-        # Encode scene graphs
-        scene_features, scene_mask = self.scene_encoder(scene_graphs, device)  # (B, N, 134), (B, N)
+        # Encode scene graphs (using local_scene_graphs)
+        scene_features, scene_mask = self.scene_encoder(local_scene_graphs, device)  # (B, N, 134), (B, N)
         scene_features = self.scene_proj(scene_features)  # (B, N, D)
         
         # Scene-Embedded Interaction
