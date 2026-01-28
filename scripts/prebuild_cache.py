@@ -550,6 +550,15 @@ def _select_best_image(jpg_files: list, metadata_cache: dict) -> tuple:
 # MAPREDUCE FUNCTIONS (Top-level for pickling)
 # =============================================================================
 
+# Global metadata cache for worker processes (set via Pool initializer)
+METADATA_CACHE = None
+
+def _init_worker(metadata_cache):
+    """Initializer for Pool workers: set global metadata cache."""
+    global METADATA_CACHE
+    METADATA_CACHE = metadata_cache
+
+
 def _map_qa_file(args_tuple):
     """
     MAP function: Process a single QA file and return samples.
@@ -561,6 +570,10 @@ def _map_qa_file(args_tuple):
         List of sample dicts, or empty list on failure
     """
     qa_file_str, valid_studies_frozen, mimic_cxr_str, sg_dir_str, metadata_cache = args_tuple
+    # If metadata_cache not provided in args (to avoid pickling large dicts),
+    # fall back to the global METADATA_CACHE set by the Pool initializer.
+    if metadata_cache is None:
+        metadata_cache = METADATA_CACHE or {}
     
     try:
         qa_file = Path(qa_file_str)
@@ -898,8 +911,10 @@ def main():
     mimic_cxr_str = str(mimic_cxr_path)
     sg_dir_str = str(sg_dir) if sg_dir.exists() else None
     
+    # Pass None for metadata_cache in chunk args to avoid pickling the full
+    # metadata dict with every task. Workers receive the cache via initializer.
     chunk_args_list = [
-        (chunk, valid_studies, mimic_cxr_str, sg_dir_str, metadata_cache)
+        (chunk, valid_studies, mimic_cxr_str, sg_dir_str, None)
         for chunk in chunks
     ]
     
@@ -914,7 +929,8 @@ def main():
     start_time = time.time()
     
     try:
-        with Pool(processes=num_workers) as pool:
+        # Use initializer to populate METADATA_CACHE in each worker process
+        with Pool(processes=num_workers, initializer=_init_worker, initargs=(metadata_cache,)) as pool:
             # Use imap_unordered for better performance and progress tracking
             for i, result in enumerate(pool.imap_unordered(_map_qa_chunk, chunk_args_list)):
                 all_samples.extend(result['samples'])
