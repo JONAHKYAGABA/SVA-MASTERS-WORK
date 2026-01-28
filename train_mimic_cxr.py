@@ -417,19 +417,32 @@ def push_to_hub(
 
 def _generate_model_card(config: MIMICCXRVQAConfig, metrics: Dict[str, float]) -> str:
     """Generate Hugging Face model card."""
+    # Precompute metric strings to avoid invalid f-string format specifiers
+    acc = metrics.get('accuracy')
+    binary_acc = metrics.get('binary_accuracy')
+    cat_f1 = metrics.get('category_f1')
+    chex_auroc = metrics.get('chexpert_auroc')
+
+    acc_str = f"{acc:.3f}" if isinstance(acc, float) else "N/A"
+    binary_acc_str = f"{binary_acc:.3f}" if isinstance(binary_acc, float) else "N/A"
+    cat_f1_str = f"{cat_f1:.3f}" if isinstance(cat_f1, float) else "N/A"
+    chex_auroc_str = f"{chex_auroc:.3f}" if isinstance(chex_auroc, float) else "N/A"
+
+    mixed_precision = 'Enabled' if config.training.fp16 else 'Disabled'
+
     card = f"""---
 language: en
 license: mit
 library_name: pytorch
 tags:
-  - medical-vqa
-  - chest-x-ray
-  - scene-graph
-  - visual-question-answering
-  - mimic-cxr
+    - medical-vqa
+    - chest-x-ray
+    - scene-graph
+    - visual-question-answering
+    - mimic-cxr
 datasets:
-  - mimic-cxr-jpg
-  - mimic-ext-cxr-qba
+    - mimic-cxr-jpg
+    - mimic-ext-cxr-qba
 ---
 
 # SSG-VQA-Net for MIMIC-CXR Visual Question Answering
@@ -451,17 +464,17 @@ using the MIMIC-CXR-JPG images and MIMIC-Ext-CXR-QBA question-answer pairs.
 
 | Metric | Value |
 |--------|-------|
-| Overall Accuracy | {metrics.get('accuracy', 'N/A'):.3f if isinstance(metrics.get('accuracy'), float) else 'N/A'} |
-| Binary Accuracy | {metrics.get('binary_accuracy', 'N/A'):.3f if isinstance(metrics.get('binary_accuracy'), float) else 'N/A'} |
-| Category F1 | {metrics.get('category_f1', 'N/A'):.3f if isinstance(metrics.get('category_f1'), float) else 'N/A'} |
-| CheXpert AUROC | {metrics.get('chexpert_auroc', 'N/A'):.3f if isinstance(metrics.get('chexpert_auroc'), float) else 'N/A'} |
+| Overall Accuracy | {acc_str} |
+| Binary Accuracy | {binary_acc_str} |
+| Category F1 | {cat_f1_str} |
+| CheXpert AUROC | {chex_auroc_str} |
 
 ## Training Details
 
 - **Batch Size**: {config.training.batch_size_per_gpu} per GPU
 - **Learning Rate**: {config.training.learning_rate}
 - **Epochs**: {config.training.num_epochs}
-- **Mixed Precision**: {'Enabled' if config.training.fp16 else 'Disabled'}
+- **Mixed Precision**: {mixed_precision}
 
 ## Usage
 
@@ -475,11 +488,12 @@ model = MIMICCXRVQAModel.from_pretrained("{config.training.hub_model_id}")
 
 ```bibtex
 @article{{ssg-vqa-mimic,
-  title={{Scene Graph-Enhanced VQA for Chest X-Ray Analysis}},
-  year={{2026}}
+    title={{Scene Graph-Enhanced VQA for Chest X-Ray Analysis}},
+    year={{2026}}
 }}
 ```
 """
+
     return card
 
 
@@ -1030,7 +1044,7 @@ def main(args):
             rank=local_rank,
             shuffle=False
         )
-    
+    logger.info(f"Using sampler {train_sampler} {val_sampler}")
     # Create dataloaders with distributed samplers
     # Optimized for high-CPU machines (48 vCPU = 10 workers per GPU * 4 GPUs)
     prefetch_factor = getattr(config.training, 'dataloader_prefetch_factor', 4)
@@ -1192,7 +1206,7 @@ def main(args):
             anneal_strategy='cos'
         )
         
-        scaler = GradScaler('cuda''cuda') if config.training.fp16 else None
+        scaler = GradScaler('cuda') if config.training.fp16 else None
     
     # Print training info (main process only)
     if is_main_process(local_rank):
