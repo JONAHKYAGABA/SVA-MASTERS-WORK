@@ -54,6 +54,9 @@ class MIMICVQAOutput(dict):
         self[name] = value
         object.__setattr__(self, name, value)
 
+    def __iter__(self):
+        return iter(self.keys())
+
 
 @dataclass
 class MIMICVQAOutput:
