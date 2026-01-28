@@ -922,6 +922,27 @@ def main(args):
         config.wandb.project = args.wandb_project
     if args.disable_wandb:
         config.wandb.enabled = False
+
+    # ----- Phase detection and dataset quality alignment -----
+    phase = getattr(config.training, 'phase', 'finetune')
+    phase = phase.lower() if isinstance(phase, str) else 'finetune'
+    if phase == 'pretrain':
+        # Pretraining should prefer B-grade (noisy + broad) and a higher LR
+        config.data.quality_grade = getattr(config.data, 'quality_grade', 'B') or 'B'
+        # If the config uses the default LR, bump for pretraining
+        if not args.learning_rate and (not config.training.learning_rate or config.training.learning_rate == 5e-5):
+            config.training.learning_rate = 1e-4
+        # Default output dir suffix for clarity
+        if not args.output_dir or args.output_dir == './checkpoints/mimic-cxr-vqa':
+            config.training.output_dir = os.path.join(config.training.output_dir, 'pretrain')
+    elif phase == 'finetune':
+        # Finetuning should prefer A-grade (clean) and a lower LR
+        config.data.quality_grade = getattr(config.data, 'quality_grade', 'A') or 'A'
+        if not args.learning_rate and (not config.training.learning_rate or config.training.learning_rate == 5e-5):
+            config.training.learning_rate = 5e-5
+        if not args.output_dir or args.output_dir == './checkpoints/mimic-cxr-vqa':
+            config.training.output_dir = os.path.join(config.training.output_dir, 'finetune')
+
     
     # Enable DeepSpeed if requested and available
     use_deepspeed = args.use_deepspeed and DEEPSPEED_AVAILABLE
@@ -1208,6 +1229,58 @@ def main(args):
         
         scaler = GradScaler('cuda') if config.training.fp16 else None
     
+    # Allow resuming from checkpoint: set defaults
+    start_epoch = 1
+    global_step = 0
+
+    # Resume checkpoint loader (best-effort; works for standard torch checkpoints)
+    if args.resume_from_checkpoint:
+        ckpt_path = Path(args.resume_from_checkpoint)
+        # If directory provided, expect pytorch_model.bin inside
+        if ckpt_path.is_dir():
+            ckpt_file = ckpt_path / 'pytorch_model.bin'
+        else:
+            ckpt_file = ckpt_path
+
+        if ckpt_file.exists():
+            try:
+                map_location = 'cpu' if device.type == 'cpu' else f'cuda:{local_rank}'
+                checkpoint = torch.load(str(ckpt_file), map_location=map_location)
+
+                # Get underlying model (unwrapped)
+                model_to_load = model.module if hasattr(model, 'module') else model
+
+                # Load model state dict if present
+                model_state = checkpoint.get('model_state_dict', checkpoint)
+                try:
+                    model_to_load.load_state_dict(model_state, strict=False)
+                    logger.info(f"Loaded model weights from {ckpt_file}")
+                except Exception as e:
+                    logger.warning(f"Partial model load: {e}")
+
+                # Try to load optimizer and scheduler states (skip for DeepSpeed)
+                if not use_deepspeed and 'optimizer_state_dict' in checkpoint and 'optimizer' in locals():
+                    try:
+                        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                        logger.info("Loaded optimizer state from checkpoint")
+                    except Exception as e:
+                        logger.warning(f"Failed to load optimizer state: {e}")
+
+                if 'scheduler_state_dict' in checkpoint and 'scheduler' in locals() and scheduler is not None:
+                    try:
+                        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                        logger.info("Loaded scheduler state from checkpoint")
+                    except Exception as e:
+                        logger.warning(f"Failed to load scheduler state: {e}")
+
+                start_epoch = int(checkpoint.get('epoch', 1))
+                global_step = int(checkpoint.get('global_step', 0))
+
+            except Exception as e:
+                logger.warning(f"Could not load checkpoint {ckpt_file}: {e}")
+        else:
+            logger.warning(f"Checkpoint not found: {ckpt_file}")
+
     # Print training info (main process only)
     if is_main_process(local_rank):
         print_training_info(config, world_size, model, device)
@@ -1226,7 +1299,7 @@ def main(args):
         logger.info(f"Steps per epoch: {len(train_dataloader) // config.training.gradient_accumulation_steps}")
         logger.info(f"Total training steps: {total_steps}")
     
-    for epoch in range(1, config.training.num_epochs + 1):
+    for epoch in range(start_epoch, config.training.num_epochs + 1):
         # Set epoch for distributed sampler
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
@@ -1409,6 +1482,8 @@ if __name__ == "__main__":
     
     # Hub
     parser.add_argument('--hub_model_id', type=str, help='Hugging Face Hub model ID')
+    parser.add_argument('--resume_from_checkpoint', type=str, default=None,
+                       help='Path to a checkpoint directory or file to resume training from')
     
     # Wandb
     parser.add_argument('--wandb_project', type=str, default='mimic-cxr-vqa', help='W&B project name')
