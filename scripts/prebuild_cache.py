@@ -36,6 +36,7 @@ from multiprocessing import Pool, cpu_count
 from functools import partial
 import time
 import random
+import tempfile
 
 # Add project root
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -685,12 +686,36 @@ def _map_qa_chunk(chunk_args):
             except:
                 files_skipped_img += 1
     
-    return {
-        'samples': all_samples,
-        'files_processed': files_processed,
-        'files_skipped_split': files_skipped_split,
-        'files_skipped_img': files_skipped_img,
-    }
+    # To avoid sending very large objects through the multiprocessing
+    # pipe (which can cause BrokenPipeError), write the chunk results to
+    # a temporary file and return only the file path and small stats.
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix='.pkl', prefix='prebuild_chunk_')
+        with os.fdopen(fd, 'wb') as tf:
+            pickle.dump({
+                'samples': all_samples,
+                'files_processed': files_processed,
+                'files_skipped_split': files_skipped_split,
+                'files_skipped_img': files_skipped_img,
+            }, tf, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Clear large list to free memory in worker (best-effort)
+        all_samples = None
+
+        return {
+            'temp_file': tmp_path,
+            'files_processed': files_processed,
+            'files_skipped_split': files_skipped_split,
+            'files_skipped_img': files_skipped_img,
+        }
+    except Exception:
+        # Fallback to in-memory return (rare)
+        return {
+            'samples': all_samples,
+            'files_processed': files_processed,
+            'files_skipped_split': files_skipped_split,
+            'files_skipped_img': files_skipped_img,
+        }
 
 
 def _chunk_list(lst, chunk_size):
@@ -933,10 +958,30 @@ def main():
         with Pool(processes=num_workers, initializer=_init_worker, initargs=(metadata_cache,)) as pool:
             # Use imap_unordered for better performance and progress tracking
             for i, result in enumerate(pool.imap_unordered(_map_qa_chunk, chunk_args_list)):
-                all_samples.extend(result['samples'])
-                total_processed += result['files_processed']
-                total_skipped_split += result['files_skipped_split']
-                total_skipped_img += result['files_skipped_img']
+                # Result may contain a temp_file where the worker wrote the
+                # full samples to avoid large IPC payloads. Load and cleanup.
+                samples = []
+                if result is None:
+                    continue
+                if 'temp_file' in result:
+                    tmp = result.get('temp_file')
+                    try:
+                        with open(tmp, 'rb') as tf:
+                            chunk_data = pickle.load(tf)
+                        samples = chunk_data.get('samples', [])
+                    except Exception:
+                        samples = []
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+                else:
+                    samples = result.get('samples', [])
+
+                all_samples.extend(samples)
+                total_processed += result.get('files_processed', 0)
+                total_skipped_split += result.get('files_skipped_split', 0)
+                total_skipped_img += result.get('files_skipped_img', 0)
                 
                 # Progress update every 10 chunks or at end
                 if (i + 1) % 10 == 0 or (i + 1) == len(chunks):
@@ -963,10 +1008,27 @@ def main():
         
         for chunk_args in tqdm(chunk_args_list, desc="Processing", unit="chunk"):
             result = _map_qa_chunk(chunk_args)
-            all_samples.extend(result['samples'])
-            total_processed += result['files_processed']
-            total_skipped_split += result['files_skipped_split']
-            total_skipped_img += result['files_skipped_img']
+            if result is None:
+                continue
+            if 'temp_file' in result:
+                tmp = result.get('temp_file')
+                try:
+                    with open(tmp, 'rb') as tf:
+                        chunk_data = pickle.load(tf)
+                    samples = chunk_data.get('samples', [])
+                except Exception:
+                    samples = []
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+            else:
+                samples = result.get('samples', [])
+
+            all_samples.extend(samples)
+            total_processed += result.get('files_processed', 0)
+            total_skipped_split += result.get('files_skipped_split', 0)
+            total_skipped_img += result.get('files_skipped_img', 0)
     
     elapsed = time.time() - start_time
     
