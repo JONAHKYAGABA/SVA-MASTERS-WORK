@@ -274,15 +274,3 @@ def get_finetune_config() -> MIMICCXRVQAConfig:
     config.training.num_epochs = 20
     config.training.chexpert_loss_weight = 0.3  # Lighter auxiliary
     return config
-
-# In train_mimic_cxr.py
-phase = config.training.phase if hasattr(config.training, 'phase') else 'finetune'
-if phase == 'pretrain':
-    logger.info("PHASE: Pre-training on B-grade data (31.2M pairs)")
-    config.data.quality_grade = 'B'
-elif phase == 'finetune':
-    logger.info("PHASE: Fine-tuning on A-grade data (7.5M pairs)")
-    config.data.quality_grade = 'A'
-    # Automatically load pretrained weights if not specified
-    if not args.resume_from_checkpoint:
-        args.resume_from_checkpoint = './checkpoints/mimic-cxr-vqa-pretrain/best_model'
