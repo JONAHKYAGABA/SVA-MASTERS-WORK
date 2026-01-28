@@ -708,27 +708,12 @@ class MIMICCXRVQAModel(nn.Module):
         question_types: Optional[List[str]] = None,
         image_widths: Optional[torch.Tensor] = None,
         image_heights: Optional[torch.Tensor] = None
-    ) -> MIMICVQAOutput:
+    ) -> Dict[str, torch.Tensor]:  # Return type updated to Dict
         """
-        Forward pass.
+        Forward pass for the MIMIC-CXR VQA model.
         
-        Args:
-            images: (B, 3, H, W) input images
-            input_ids: (B, L) tokenized questions
-            attention_mask: (B, L) attention mask for text
-            scene_graphs: List of scene graph dicts with keys:
-                - bboxes: (N, 4) normalized bounding boxes
-                - region_ids: (N,) region embedding indices
-                - entity_ids: (N,) entity embedding indices
-                - positiveness: (N,) binary polarity indicators
-                - num_objects: int number of observations
-            token_type_ids: (B, L) optional token type IDs
-            question_types: List of question type strings (e.g., "D02_has_finding")
-            image_widths: (B,) original image widths (for denormalization if needed)
-            image_heights: (B,) original image heights (for denormalization if needed)
-            
         Returns:
-            MIMICVQAOutput with vqa_logits, chexpert_logits, pooled_output
+            A dictionary containing model outputs.
         """
         device = images.device
         batch_size = images.shape[0]
@@ -785,11 +770,13 @@ class MIMICCXRVQAModel(nn.Module):
             visual_pooled = (visual_features * visual_mask.unsqueeze(-1)).sum(1) / visual_mask.sum(1, keepdim=True).clamp(min=1)
             chexpert_logits = self.chexpert_head(visual_pooled)
         
-        return MIMICVQAOutput(
+        output = MIMICVQAOutput(
             vqa_logits=vqa_logits,
             chexpert_logits=chexpert_logits,
             pooled_output=fused
         )
+
+        return dict(output)  # Explicitly convert to dict before returning
     
     @classmethod
     def from_pretrained(cls, path: str, **kwargs):
