@@ -57,6 +57,9 @@ class MIMICVQAOutput(dict):
     def __iter__(self):
         return iter(self.keys())
 
+    def items(self):
+        return self.__dict__.items()
+
 
 @dataclass
 class MIMICVQAOutput:
