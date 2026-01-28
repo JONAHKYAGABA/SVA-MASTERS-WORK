@@ -30,6 +30,34 @@ except ImportError:
     TRANSFORMERS_AVAILABLE = False
 
 
+class MIMICVQAOutput(dict):
+    """Output container for MIMIC VQA model that behaves like a dict and supports attribute access."""
+
+    def __init__(self, vqa_logits, chexpert_logits, pooled_output, hidden_states=None):
+        super().__init__(
+            vqa_logits=vqa_logits,
+            chexpert_logits=chexpert_logits,
+            pooled_output=pooled_output,
+            hidden_states=hidden_states,
+        )
+        # mirror dict keys as attributes for compatibility
+        for k, v in self.items():
+            object.__setattr__(self, k, v)
+
+    def __getattr__(self, name):
+        if name in self:
+            return self[name]
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        # keep dict and attribute state in sync
+        if name in self.__dict__ or name in ('__dict__',):
+            object.__setattr__(self, name, value)
+        else:
+            self[name] = value
+            object.__setattr__(self, name, value)
+
+
 @dataclass
 class MIMICVQAOutput:
     """Output container for MIMIC VQA model."""
