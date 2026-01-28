@@ -78,14 +78,8 @@ class MIMICVQAOutput(dict):
         object.__delattr__(self, key)
 
 
-@dataclass
-class MIMICVQAOutput:
-    """Output container for MIMIC VQA model."""
-    vqa_logits: Dict[str, torch.Tensor]
-    chexpert_logits: Optional[torch.Tensor]
-    pooled_output: torch.Tensor
-    hidden_states: Optional[torch.Tensor] = None
 
+# Single dict-like MIMICVQAOutput class is defined above; removed duplicate dataclass.
 
 class ConvNeXtFeatureExtractor(nn.Module):
     """
