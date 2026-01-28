@@ -57,8 +57,25 @@ class MIMICVQAOutput(dict):
     def __iter__(self):
         return iter(self.keys())
 
+    def keys(self):
+        return super().keys()
+
+    def values(self):
+        return super().values()
+
     def items(self):
-        return self.__dict__.items()
+        return super().items()
+
+    def __getitem__(self, key):
+        return super().__getitem__(key)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        object.__setattr__(self, key, value)
+
+    def __delitem__(self, key):
+        super().__delitem__(key)
+        object.__delattr__(self, key)
 
 
 @dataclass
@@ -776,13 +793,15 @@ class MIMICCXRVQAModel(nn.Module):
             visual_pooled = (visual_features * visual_mask.unsqueeze(-1)).sum(1) / visual_mask.sum(1, keepdim=True).clamp(min=1)
             chexpert_logits = self.chexpert_head(visual_pooled)
         
+        # Create the output object
         output = MIMICVQAOutput(
             vqa_logits=vqa_logits,
             chexpert_logits=chexpert_logits,
             pooled_output=fused
         )
 
-        return dict(output)  # Explicitly convert to dict before returning
+        # Explicitly convert to a dictionary before returning
+        return dict(output)
     
     @classmethod
     def from_pretrained(cls, path: str, **kwargs):
